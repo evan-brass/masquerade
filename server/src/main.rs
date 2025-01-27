@@ -538,14 +538,6 @@ fn main() -> Result<std::convert::Infallible, std::io::Error> {
 								// Don't send a TURN STUN message, the DTLS layer handles sending the encrypted application data
 								continue;
 							}
-
-							// Zero out the padding bytes:
-							let padding = (4 - len % 4) % 4;
-							msg.buffer[48 + len..][..padding].fill(0);
-
-							// Write the length of the Data attribute and update the length of the STUN packet
-							msg.buffer[46..48].copy_from_slice(&u16::to_be_bytes(len as u16));
-							msg.set_length(28 + (len + padding) as u16);
 						}
 
 						// Hosted DTLS
@@ -833,6 +825,14 @@ fn main() -> Result<std::convert::Infallible, std::io::Error> {
 						// Non-hosted: relay
 						_ => {}
 					}
+
+					// Zero out the padding bytes:
+					let padding = (4 - len % 4) % 4;
+					msg.buffer[48 + len..][..padding].fill(0);
+
+					// Write the length of the Data attribute and update the length of the STUN packet
+					msg.buffer[46..48].copy_from_slice(&u16::to_be_bytes(len as u16));
+					msg.set_length(28 + (len + padding) as u16);
 				} else {
 					continue;
 				}
