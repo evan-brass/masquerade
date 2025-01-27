@@ -1,3 +1,14 @@
+use std::collections::VecDeque;
+use std::io;
+use std::net::Ipv4Addr;
+use std::net::SocketAddr;
+use std::net::SocketAddrV6;
+use std::net::UdpSocket;
+use std::{
+	thread::sleep,
+	time::{Duration, Instant},
+};
+
 use openssl::ssl::{ErrorCode, SslStream};
 use openssl::{
 	error::ErrorStack,
@@ -9,17 +20,9 @@ use openssl::{
 	x509::X509,
 };
 use rand::{random, thread_rng, RngCore};
+
 use sctp::{Chunk, Data, Init, Param, Sack, Sctp};
-use std::collections::VecDeque;
-use std::io;
-use std::net::Ipv4Addr;
-use std::net::SocketAddr;
-use std::net::SocketAddrV6;
-use std::net::UdpSocket;
-use std::{
-	thread::sleep,
-	time::{Duration, Instant},
-};
+use stun::{attr::integrity::Integrity, attr::parse::AttrIter as _, attr::*, Class, Method, Stun};
 
 const B62_CHARSET: &[char] = &[
 	'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S',
@@ -54,8 +57,6 @@ fn to_base62(fingerprint: &mut [u8]) -> Option<String> {
 
 	Some(ret)
 }
-
-use stun::{attr::integrity::Integrity, attr::parse::AttrIter as _, attr::*, Class, Method, Stun};
 
 const HOSTED: SocketAddrV6 = SocketAddrV6::new(Ipv4Addr::BROADCAST.to_ipv6_mapped(), 3478, 0, 0);
 
