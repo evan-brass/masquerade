@@ -496,6 +496,12 @@ fn main() -> Result<std::convert::Infallible, std::io::Error> {
 									continue;
 								};
 
+								// Truncate the ICE connection test to remove the fingerprint attribute (I wish it wasn't even there to begin with)
+								let trunc_length = integrity.mac.as_ptr() as usize
+									- inner.buffer.as_ptr() as usize
+									- 20 + 20; // -20 to remove STUN header, +20 to include the 20byte sha-1 value
+								inner.set_length(trunc_length as u16);
+
 								// Append the peer address to the inner packet:
 								let Ok(_) =
 									inner.append::<XOR_PEER_ADDRESS, SocketAddr>(&sender.into())
