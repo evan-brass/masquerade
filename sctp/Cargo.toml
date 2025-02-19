@@ -1,8 +1,0 @@
-[package]
-name = "sctp"
-version = "0.1.0"
-edition = "2021"
-
-[dependencies]
-crc = "3.2.1"
-tokio-util = { version = "0.7.13", features = ["codec"] }
