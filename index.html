@@ -1,11 +1,11 @@
 <!DOCTYPE html>
 <!-- Multicast ip -->
-<script type="module">
+<script type="_module">
 	const config = {
 		iceTransportPolicy: 'relay',
 		iceServers: [{
 			// urls: 'turn:stun.evan-brass.net',
-			urls: 'turn:127.0.0.1',
+			urls: ['turn:localhost?transport=tcp', 'turn:localhost'],
 			username: 'guest',
 			credential: 'password',
 		}],
@@ -25,7 +25,7 @@
 			'a=ice-options:trickle',
 			'm=application 42 UDP/DTLS/SCTP webrtc-datachannel',
 			'c=IN IP4 0.0.0.0',
-			'a=candidate:f 1 udp 42 ::ffff:255.255.255.255 4666 typ relay',
+			'a=candidate:f 1 udp 42 ::ffff:255.255.255.255 65535 typ relay',
 			'a=mid:dc',
 			'a=setup:passive',
 			'a=sctp-port:5000',
@@ -36,12 +36,12 @@
 </script>
 
 <!-- Relay only a<->b -->
-<script type="_module">
+<script type="module">
 	const config = {
 		iceTransportPolicy: 'relay',
 		iceServers: [{
 			// urls: 'turn:stun.evan-brass.net',
-			urls: 'turn:127.0.0.1',
+			urls: ['turn:localhost?transport=tcp', 'turn:localhost'],
 			username: 'guest',
 			credential: 'password',
 		}],

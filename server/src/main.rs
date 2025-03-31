@@ -16,7 +16,6 @@ const TURN_KEY: &[u8] = &[
 fn main() -> Result<std::convert::Infallible, std::io::Error> {
 	// Network stuff
 	let sock = UdpSocket::bind("[::]:3478")?;
-	sock.set_broadcast(true)?;
 	let mut buffer = [0; 2048];
 
 	loop {
