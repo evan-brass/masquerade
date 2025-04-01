@@ -1,9 +1,0 @@
-[package]
-name = "server2"
-version = "0.1.0"
-edition = "2024"
-
-[dependencies]
-eyre = "0.6.12"
-mio = { version = "1", features = ["net", "os-poll"] }
-stun = { version = "0.1.0", path = "../stun" }

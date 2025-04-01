@@ -1,8 +1,10 @@
+use eyre::Result;
+use stun::{Stun, Class, Method, attr::{*, parse::AttrIter as _, integrity::Integrity}};
+use std::io::{Error, ErrorKind, Read as _, Write as _};
 use std::net::SocketAddr;
-use std::net::UdpSocket;
-use std::{thread::sleep, time::Duration};
-
-use stun::{attr::integrity::Integrity, attr::parse::AttrIter as _, attr::*, Class, Method, Stun};
+use mio::event::Source as _;
+use mio::net::{TcpListener, TcpStream, UdpSocket};
+use mio::{Events, Poll, Interest, Token};
 
 // Constants used by this server
 const TURN_REALM: &str = "none";
@@ -13,21 +15,36 @@ const TURN_KEY: &[u8] = &[
 	0x01, 0x5c, 0x8a, 0x97, 0x3e, 0xa4, 0xb4, 0xa9, 0xc9, 0x45, 0xf6, 0x90, 0x14, 0x2b, 0xf3, 0xad,
 ];
 
-fn main() -> Result<std::convert::Infallible, std::io::Error> {
-	// Network stuff
-	let sock = UdpSocket::bind("[::]:3478")?;
-	let mut buffer = [0; 2048];
+fn would_block<T>(res: &Result<T, Error>) -> bool {
+	match res {
+		Err(e) if e.kind() == ErrorKind::WouldBlock => true,
+		_ => false
+	}
+}
 
-	loop {
-		let (len, SocketAddr::V6(sender)) = sock.recv_from(&mut buffer)? else {
-			continue;
-		};
+// These are the turn
+struct Turn {
+	addr: SocketAddr,
+	stream: TcpStream,
+	// TODO: Firefox enforces permissions, so we also might need a map from SocketAddr -> u16 (pseudo port).  I wonder if we use a sorted map again... then firefox would see the remote port changing as they receive, but... IDK
+}
+struct TurnServer {
+	udp: UdpSocket,
+	tcp: TcpListener,
+	// NOTE: streams must be sorted by Turn.addr, and
+	streams: Vec<Turn>,
+	// TODO: Add DTLS state
+}
+const UDP: usize = usize::MAX;
+const TCP: usize = usize::MAX - 1;
+impl TurnServer {
+	pub fn new(addr: SocketAddr) -> Result<Self> {
+		let udp = UdpSocket::bind(addr)?;
+		let tcp = TcpListener::bind(addr)?;
+		Ok(Self { udp, tcp, streams: Vec::new() })
+	}
 
-		let mut msg = Stun::new(buffer.as_mut_slice());
-		if msg.len() != len {
-			continue;
-		}
-
+	fn handle_msg(&mut self, sender: SocketAddr, mut msg: Stun<&mut [u8]>) {
 		// Canonical socket address (ipv6-mapped -> ipv4)
 		let canonical = SocketAddr::new(sender.ip().to_canonical(), sender.port());
 
@@ -131,7 +148,7 @@ fn main() -> Result<std::convert::Infallible, std::io::Error> {
 
 			// Refresh
 			// - Close connection (No response is needed)
-			(Class::Request, Method::Refresh) if lifetime == Some(0) => continue,
+			(Class::Request, Method::Refresh) if lifetime == Some(0) => return,
 			// - Normal
 			(Class::Request, Method::Refresh) => {
 				msg.set_length(0);
@@ -173,7 +190,7 @@ fn main() -> Result<std::convert::Infallible, std::io::Error> {
 					// Write the peer address into the space we made by shifting the data attribute
 					msg.append::<XOR_PEER_ADDRESS, SocketAddr>(&sender.into())
 						.unwrap();
-					receiver = peer;
+					receiver = peer.into();
 
 					// Zero out the padding bytes:
 					let padding = (4 - len % 4) % 4;
@@ -183,17 +200,144 @@ fn main() -> Result<std::convert::Infallible, std::io::Error> {
 					msg.buffer[46..48].copy_from_slice(&u16::to_be_bytes(len as u16));
 					msg.set_length(28 + (len + padding) as u16);
 				} else {
-					continue;
+					return;
 				}
 			}
 
-			_ => continue,
+			_ => return,
 		}
 
-		// Send the TURN packet:
-		if let Ok(ret) = sock.send_to(&msg.buffer[..msg.len()], receiver) {
-			// Sleep ~1 ms per 40 bytes sent to cap send bandwidth
-			sleep(Duration::from_millis(1 + ret as u64 / 40));
+		// Find the tcp stream for the receiver (if no stream is available, then send it over udp)
+		let response = &msg.buffer[..msg.len()];
+		let res = if let Ok(i) = self.streams.binary_search_by(|t| t.addr.cmp(&receiver)) {
+			let turn = &mut self.streams[i];
+			turn.stream.write_all(response)
+		} else {
+			self.udp.send_to(response, receiver).map(|_| {})
+		};
+		if would_block(&res) { return }
+		if let Err(e) = res {
+			println!("{e:?}");
 		}
 	}
+
+	pub fn run(mut self) -> Result<std::convert::Infallible> {
+		let mut buffer = [0; 2048];
+		let mut poll = Poll::new()?;
+
+		const EVENT_CAPACITY: usize = 128;
+		let mut events = Events::with_capacity(EVENT_CAPACITY);
+		self.udp.register(poll.registry(), Token(UDP), Interest::READABLE)?;
+		self.tcp.register(poll.registry(), Token(TCP), Interest::READABLE)?;
+
+		let mut tokens = Vec::new();
+		tokens.try_reserve(EVENT_CAPACITY)?;
+		loop {
+			tokens.clear();
+			// Handle the unique tokens from least to greatest
+			tokens.extend(events.iter().map(|e| e.token().0));
+			tokens.sort();
+			tokens.dedup();
+
+			let mut removals = 0;
+			let mut removal_index = UDP;
+
+			// Iterate over each unique token
+			for tok in &tokens {
+				match *tok {
+					UDP => {
+						loop {
+							let res = self.udp.recv_from(&mut buffer);
+							if would_block(&res) { break }
+
+							let (len, sender) = res?;
+							let msg = Stun{ buffer: &mut buffer[..] };
+							if msg.len() == len {
+								self.handle_msg(sender, msg);
+							}
+						}
+					}
+					TCP => {
+						loop {
+							let res = self.tcp.accept();
+							if would_block(&res) { break }
+
+							let (mut stream, addr) = res?;
+							stream.set_nodelay(true)?;
+
+							// We should never have two tcp streams with the same remote address.
+							let i = self.streams.binary_search_by(|t| t.addr.cmp(&addr)).unwrap_err();
+
+							// Reserve space for another stream
+							if self.streams.try_reserve(1).is_err() { continue }
+
+							stream.register(poll.registry(), Token(i), Interest::READABLE)?;
+							self.streams.insert(i, Turn{addr, stream});
+
+							// Reregister all following streams to fix their Token
+							for j in (i + 1)..self.streams.len() {
+								let turn = &mut self.streams[j];
+								turn.stream.reregister(poll.registry(), Token(j), Interest::READABLE)?;
+							}
+						}
+					}
+					i => {
+						// Adjust the token to match current indexes:
+						let i = i - removals;
+						loop {
+							let turn = &mut self.streams[i];
+							let sender = turn.addr;
+							let res = turn.stream.peek(&mut buffer);
+							if would_block(&res) { break }
+
+							// Handle streams being closed / erroring out
+							let Ok(len) = res else {
+								turn.stream.deregister(poll.registry())?;
+								self.streams.remove(i);
+								removals += 1;
+								if i < removal_index { removal_index = i; }
+								break
+							};
+							// We can't read the msg_len of this packet until we have at least 4 bytes
+							if len < 4 { break }
+							let msg_len = Stun { buffer: &buffer[..] }.len();
+
+							// Close connection if message is too large for our buffer
+							if msg_len > buffer.len() {
+								turn.stream.deregister(poll.registry())?;
+								self.streams.remove(i);
+								if i < removal_index { removal_index = i; }
+								removals += 1;
+								break
+							}
+
+							// If we don't have the full message than wait
+							if msg_len > len { break }
+
+							// Consume the peeked data
+							turn.stream.read_exact(&mut buffer[..msg_len])?;
+
+							let msg = Stun { buffer: &mut buffer[..] };
+							self.handle_msg(sender, msg);
+						}
+					}
+				}
+			}
+
+			// If we've removed any connections then we need to reregister following connections:
+			if removals > 0 {
+				for i in removal_index..self.streams.len() {
+					self.streams[i].stream.reregister(poll.registry(), Token(i), Interest::READABLE)?;
+				}
+			}
+
+			poll.poll(&mut events, None)?;
+		}
+	}
+}
+
+fn main() -> Result<std::convert::Infallible> {
+	let addr = "[::]:3478".parse()?;
+	let server = TurnServer::new(addr)?;
+	server.run()
 }

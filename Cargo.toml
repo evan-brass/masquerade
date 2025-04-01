@@ -1,3 +1,3 @@
 [workspace]
 resolver = "2"
-members = ["server", "server2", "stun"]
+members = ["server", "stun"]

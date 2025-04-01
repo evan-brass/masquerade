@@ -4,4 +4,6 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+eyre = "0.6.12"
+mio = { version = "1", features = ["net", "os-poll"] }
 stun = { path = "../stun", default-features = false, features = ["integrity"] }
