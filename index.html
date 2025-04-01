@@ -37,18 +37,22 @@
 
 <!-- Relay only a<->b -->
 <script type="module">
-	const config = {
-		iceTransportPolicy: 'relay',
-		iceServers: [{
-			// urls: 'turn:stun.evan-brass.net',
-			urls: ['turn:localhost?transport=tcp', 'turn:localhost'],
-			username: 'guest',
-			credential: 'password',
-		}],
-	};
-
-	const a = new RTCPeerConnection(config);
-	const b = new RTCPeerConnection(config);
+	const a = new RTCPeerConnection({
+			iceTransportPolicy: 'relay',
+			iceServers: [{
+				urls: 'turn:localhost',
+				username: 'guest',
+				credential: 'password',
+			}],
+		});
+	const b = new RTCPeerConnection({
+			iceTransportPolicy: 'relay',
+			iceServers: [{
+				urls: 'turn:localhost?transport=tcp',
+				username: 'guest',
+				credential: 'password',
+			}],
+		});
 	a.createDataChannel('');
 
 	a.addEventListener('connectionstatechange', () => console.log('a', a.connectionState));
