@@ -1,10 +1,8 @@
-#![feature(slice_partition_dedup)]
-
 use eyre::Result;
 use stun::{Stun, Class, Method, attr::{*, parse::AttrIter as _, integrity::Integrity}};
-use std::io::{Error, ErrorKind, Read as _, Write};
+use std::io::{Error, ErrorKind, Read as _, Write as _};
 use std::net::SocketAddr;
-use mio::event::Source;
+use mio::event::Source as _;
 use mio::net::{TcpListener, TcpStream, UdpSocket};
 use mio::{Events, Poll, Interest, Token};
 
@@ -231,23 +229,21 @@ impl TurnServer {
 		let mut events = Events::with_capacity(EVENT_CAPACITY);
 		self.udp.register(poll.registry(), Token(UDP), Interest::READABLE)?;
 		self.tcp.register(poll.registry(), Token(TCP), Interest::READABLE)?;
+
+		let mut tokens = Vec::new();
+		tokens.try_reserve(EVENT_CAPACITY)?;
 		loop {
-			// We want to handle the event's in a sorted ordering.  Handling TCP last means new connections (and inserts into streams) will happen after processing everything.  This also means that we will only need to keep track of removals, which is just a fixed offset to find the true turn from it's old token.
-			let mut tokens = [0; EVENT_CAPACITY];
-			let mut count = 0;
-			for e in events.iter() {
-				tokens[count] = e.token().0;
-				count += 1;
-			}
-			let tokens = &mut tokens[0..count];
+			tokens.clear();
+			// Handle the unique tokens from least to greatest
+			tokens.extend(events.iter().map(|e| e.token().0));
 			tokens.sort();
-			// Remove duplicates(we handle in a loop below so should be fine)
-			let (tokens, _) = tokens.partition_dedup();
+			tokens.dedup();
 
 			let mut removals = 0;
+			let mut removal_index = UDP;
 
 			// Iterate over each unique token
-			for tok in tokens {
+			for tok in &tokens {
 				match *tok {
 					UDP => {
 						loop {
@@ -299,6 +295,7 @@ impl TurnServer {
 								turn.stream.deregister(poll.registry())?;
 								self.streams.remove(i);
 								removals += 1;
+								if i < removal_index { removal_index = i; }
 								break
 							};
 							// We can't read the msg_len of this packet until we have at least 4 bytes
@@ -309,6 +306,7 @@ impl TurnServer {
 							if msg_len > buffer.len() {
 								turn.stream.deregister(poll.registry())?;
 								self.streams.remove(i);
+								if i < removal_index { removal_index = i; }
 								removals += 1;
 								break
 							}
@@ -325,6 +323,14 @@ impl TurnServer {
 					}
 				}
 			}
+
+			// If we've removed any connections then we need to reregister following connections:
+			if removals > 0 {
+				for i in removal_index..self.streams.len() {
+					self.streams[i].stream.reregister(poll.registry(), Token(i), Interest::READABLE)?;
+				}
+			}
+
 			poll.poll(&mut events, None)?;
 		}
 	}

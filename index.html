@@ -41,6 +41,7 @@
 			iceTransportPolicy: 'relay',
 			iceServers: [{
 				urls: 'turn:localhost',
+				// urls: 'turn:localhost?transport=tcp',
 				username: 'guest',
 				credential: 'password',
 			}],
@@ -48,6 +49,7 @@
 	const b = new RTCPeerConnection({
 			iceTransportPolicy: 'relay',
 			iceServers: [{
+				// urls: 'turn:localhost',
 				urls: 'turn:localhost?transport=tcp',
 				username: 'guest',
 				credential: 'password',
@@ -60,8 +62,9 @@
 
 	await a.setLocalDescription();
 	while (a.iceGatheringState != 'complete') await new Promise(res => a.addEventListener('icegatheringstatechange', res, { once: true }));
-
 	await b.setRemoteDescription(a.localDescription);
+
 	await b.setLocalDescription();
+	while (b.iceGatheringState != 'complete') await new Promise(res => b.addEventListener('icegatheringstatechange', res, { once: true }));
 	await a.setRemoteDescription(b.localDescription);
 </script>

@@ -14,7 +14,7 @@ str_attr!(ALTERNATE_DOMAIN);
 str_attr!(SOFTWARE);
 
 impl<const N: usize> Attr<'_, UNKNOWN_ATTRIBUTES> for [u16; N] {
-	type Error = std::convert::Infallible;
+	type Error = core::convert::Infallible;
 	fn decode(_: Prefix, value: &[u8]) -> Result<Self, Self::Error> {
 		let mut ret = [0; N];
 		for (i, c) in value.chunks_exact(2).enumerate().take(N) {
