@@ -211,6 +211,7 @@ impl TurnServer {
 		let response = &msg.buffer[..msg.len()];
 		let res = if let Ok(i) = self.streams.binary_search_by(|t| t.addr.cmp(&receiver)) {
 			let turn = &mut self.streams[i];
+			// TODO: This is not sufficient.  Partial writes are unavoidable, so if you start writing a frame... you must finish or else your stream is corrupted and useless.  We need to pool buffers for writing.
 			turn.stream.write_all(response)
 		} else {
 			self.udp.send_to(response, receiver).map(|_| {})

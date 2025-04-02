@@ -14,7 +14,7 @@ mod util;
 #[cfg(test)]
 mod rfc5769;
 
-const MAGIC_COOKIE: u32 = 0x2112A442;
+pub const MAGIC_COOKIE: u32 = 0x2112A442;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Class {
