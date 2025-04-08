@@ -1,7 +1,8 @@
 use eyre::Result;
 use stun::{Stun, Class, Method, attr::{*, parse::AttrIter as _, integrity::Integrity}};
-use std::io::{Error, ErrorKind, Read as _, Write as _};
+use std::{io::{Error, ErrorKind, Read as _, Write as _}, net::Ipv4Addr};
 use std::net::SocketAddr;
+use std::rc::Rc;
 use mio::event::Source as _;
 use mio::net::{TcpListener, TcpStream, UdpSocket};
 use mio::{Events, Poll, Interest, Token};
@@ -26,6 +27,7 @@ fn would_block<T>(res: &Result<T, Error>) -> bool {
 struct Turn {
 	addr: SocketAddr,
 	stream: TcpStream,
+	partial: Option<(usize, Rc<[u8]>)>,
 	// TODO: Firefox enforces permissions, so we also might need a map from SocketAddr -> u16 (pseudo port).  I wonder if we use a sorted map again... then firefox would see the remote port changing as they receive, but... IDK
 }
 struct TurnServer {
@@ -207,19 +209,45 @@ impl TurnServer {
 			_ => return,
 		}
 
-		// Find the tcp stream for the receiver (if no stream is available, then send it over udp)
 		let response = &msg.buffer[..msg.len()];
-		let res = if let Ok(i) = self.streams.binary_search_by(|t| t.addr.cmp(&receiver)) {
-			let turn = &mut self.streams[i];
-			// TODO: This is not sufficient.  Partial writes are unavoidable, so if you start writing a frame... you must finish or else your stream is corrupted and useless.  We need to pool buffers for writing.
-			turn.stream.write_all(response)
-		} else {
-			self.udp.send_to(response, receiver).map(|_| {})
-		};
-		if would_block(&res) { return }
-		if let Err(e) = res {
-			println!("{e:?}");
+
+		// Broadcast the response to all TCP streams (that aren't currently writing partial data)
+		if receiver.ip() == Ipv4Addr::BROADCAST.to_ipv6_mapped() {
+			let buffer: Rc<[u8]> = Rc::from(response);
+			for t in self.streams.iter_mut() {
+				if t.partial.is_some() { continue }
+				let res = t.stream.write(response);
+				if would_block(&res) { continue }
+				match res {
+					Ok(written) => t.partial = Some((written, buffer.clone())),
+					Err(e) => {
+						println!("{e:?}");
+					}
+				}
+			}
 		}
+		// Unicast to a specific TCP stream
+		else if let Ok(i) = self.streams.binary_search_by(|t| t.addr.cmp(&receiver)) {
+			let turn = &mut self.streams[i];
+			if turn.partial.is_none() {
+				let res = turn.stream.write(response);
+				if would_block(&res) { return }
+				if let Ok(written) = res {
+					if written < response.len() {
+						turn.partial = Some((0, Rc::from(&response[written..])));
+					}
+				}
+			}
+			// TODO: This is not sufficient.  Partial writes are unavoidable, so if you start writing a frame... you must finish or else your stream is corrupted and useless.  We need to pool buffers for writing.
+		}
+		// Unicast to the UDP receiver
+		else {
+			let res = self.udp.send_to(response, receiver);
+			if would_block(&res) { return }
+			if let Err(e) = res {
+				println!("{e:?}");
+			}
+		};
 	}
 
 	pub fn run(mut self) -> Result<std::convert::Infallible> {
@@ -273,7 +301,7 @@ impl TurnServer {
 							if self.streams.try_reserve(1).is_err() { continue }
 
 							stream.register(poll.registry(), Token(i), Interest::READABLE)?;
-							self.streams.insert(i, Turn{addr, stream});
+							self.streams.insert(i, Turn{addr, stream, partial: None});
 
 							// Reregister all following streams to fix their Token
 							for j in (i + 1)..self.streams.len() {
@@ -287,6 +315,21 @@ impl TurnServer {
 						let i = i - removals;
 						loop {
 							let turn = &mut self.streams[i];
+
+							if let Some((offset, buffer)) = turn.partial.take() {
+								let res = turn.stream.write(&buffer[offset..]);
+								if !would_block(&res) {
+									let Ok(written) = res else {
+										turn.stream.deregister(poll.registry())?;
+										self.streams.remove(i);
+										if i < removal_index { removal_index = i; }
+										removals += 1;
+										break
+									};
+									turn.partial = Some((offset + written, buffer));
+								}
+							}
+
 							let sender = turn.addr;
 							let res = turn.stream.peek(&mut buffer);
 							if would_block(&res) { break }
