@@ -189,8 +189,14 @@ impl TurnServer {
 					msg.set_length(0);
 					msg.set_method(Method::Data);
 
-					// Write the peer address into the space we made by shifting the data attribute
-					msg.append::<XOR_PEER_ADDRESS, SocketAddr>(&sender.into())
+					// I'm experimenting with two broadcast modes:
+					msg.append::<XOR_PEER_ADDRESS, SocketAddr>(&match peer.port() {
+						// Mode 1: Preserve sender
+						65535 => sender.into(),
+						// Mode 2: Conceal sender (Hopefully useful for Firefox)
+						65534 => peer.into(),
+						_ => return
+					})
 						.unwrap();
 					receiver = peer.into();
 
