@@ -1,6 +1,6 @@
 use eyre::Result;
 use stun::{Stun, Class, Method, attr::{*, parse::AttrIter as _, integrity::Integrity}};
-use std::{io::{Error, ErrorKind, Read as _, Write as _}, net::Ipv4Addr};
+use std::{io::{Error, ErrorKind, Read as _, Write as _}, net::{IpAddr, Ipv4Addr}};
 use std::net::SocketAddr;
 use std::rc::Rc;
 use mio::event::Source as _;
@@ -15,6 +15,7 @@ const TURN_USER: &str = "guest";
 const TURN_KEY: &[u8] = &[
 	0x01, 0x5c, 0x8a, 0x97, 0x3e, 0xa4, 0xb4, 0xa9, 0xc9, 0x45, 0xf6, 0x90, 0x14, 0x2b, 0xf3, 0xad,
 ];
+const BROADCAST: IpAddr = IpAddr::V6(Ipv4Addr::BROADCAST.to_ipv6_mapped());
 
 fn would_block<T>(res: &Result<T, Error>) -> bool {
 	match res {
@@ -179,7 +180,14 @@ impl TurnServer {
 
 			// Send
 			(Class::Indication, Method::Send) => {
-				if let (Some(SocketAddr::V6(peer)), Some(data)) = (xor_peer, data) {
+				if let (Some(peer), Some(data)) = (xor_peer, data) {
+					// Our sockets should be dual stack so we want ip6-mapped:
+					let peer = SocketAddr::new(match peer.ip() {
+						IpAddr::V4(v4) => v4.to_ipv6_mapped().into(),
+						v => v
+					}, peer.port());
+					receiver = peer;
+
 					// [ STUN Header | XOR Peer Attr | Data... ]
 
 					// Shift the data attribute to where we want it
@@ -190,15 +198,18 @@ impl TurnServer {
 					msg.set_method(Method::Data);
 
 					// I'm experimenting with two broadcast modes:
-					msg.append::<XOR_PEER_ADDRESS, SocketAddr>(&match peer.port() {
+					msg.append::<XOR_PEER_ADDRESS, SocketAddr>(&match (peer.ip(), peer.port()) {
 						// Mode 1: Preserve sender
-						65535 => sender.into(),
-						// Mode 2: Conceal sender (Hopefully useful for Firefox)
-						65534 => peer.into(),
-						_ => return
+						(BROADCAST, 65535) => sender,
+						// Mode 2: Conceal sender (Useful for firefox which would otherwise drop unknown senders)
+						(BROADCAST, 65534) => SocketAddr::new(BROADCAST, 65534),
+						// Reserved for future modes
+						(BROADCAST, _) => return,
+
+						// Non-broadcast
+						_ => sender
 					})
 						.unwrap();
-					receiver = peer.into();
 
 					// Zero out the padding bytes:
 					let padding = (4 - len % 4) % 4;
@@ -218,17 +229,22 @@ impl TurnServer {
 		let response = &msg.buffer[..msg.len()];
 
 		// Broadcast the response to all TCP streams (that aren't currently writing partial data)
-		if receiver.ip() == Ipv4Addr::BROADCAST.to_ipv6_mapped() {
+		if receiver.ip() == BROADCAST {
 			let buffer: Rc<[u8]> = Rc::from(response);
 			for t in self.streams.iter_mut() {
+				// Don't send back to ourself
+				if t.addr == sender { continue }
+				// Don't send if there's already a message in flight
 				if t.partial.is_some() { continue }
+
 				let res = t.stream.write(response);
 				if would_block(&res) { continue }
 				match res {
-					Ok(written) => t.partial = Some((written, buffer.clone())),
+					Ok(written) if written < response.len() => t.partial = Some((written, buffer.clone())),
 					Err(e) => {
 						println!("{e:?}");
 					}
+					_ => {}
 				}
 			}
 		}
@@ -244,7 +260,6 @@ impl TurnServer {
 					}
 				}
 			}
-			// TODO: This is not sufficient.  Partial writes are unavoidable, so if you start writing a frame... you must finish or else your stream is corrupted and useless.  We need to pool buffers for writing.
 		}
 		// Unicast to the UDP receiver
 		else {
