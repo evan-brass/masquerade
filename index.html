@@ -2,19 +2,18 @@
 <script>
 const is_firefox = typeof RTCPeerConnection.prototype.getIdentityAssertion == 'function';
 
-const config = {
-	iceTransportPolicy: 'relay',
-	iceServers: [{
-		urls: [
-			// My turn server doesn't work for firefox on localhost because ff sends 192 -> 127 but my server responds 192 -> 192
-			// is_firefox ? 'turn:localhost?transport=tcp' : 'turn:localhost',
-			// 'turn:localhost',
-			'turn:localhost?transport=tcp',
-		],
-		username: 'guest',
-		credential: 'password',
-	}],
-};
+function config(tcp = is_firefox, relay_only = !is_firefox) {
+	return {
+		iceTransportPolicy: relay_only ? 'relay' : 'all',
+		iceServers: [{
+			urls: [
+				`turn:localhost${tcp ? '?transport=tcp' : ''}`
+			],
+			username: 'guest',
+			credential: 'password',
+		}],
+	};
+}
 
 // Log everything.
 function log_everything(conn, label = conn.pid) {
@@ -31,8 +30,8 @@ function log_everything(conn, label = conn.pid) {
 
 <!-- Broadcast autodiscovery -->
 <script type="module">
-const a = new RTCPeerConnection(config);
-const b = new RTCPeerConnection(config);
+const a = new RTCPeerConnection(config(true));
+const b = new RTCPeerConnection(config(true));
 a.createDataChannel('');
 
 log_everything(a, 'a');
@@ -44,41 +43,21 @@ await b.setLocalDescription();
 await a.setRemoteDescription(b.localDescription);
 await a.addIceCandidate({
 	sdpMLineIndex: 0,
-	candidate: `candidate:f 1 udp 42 ::ffff:255.255.255.255 65535 typ relay raddr :: rport 0`
+	candidate: `candidate:f 1 udp 42 fe80::ffff:ffff:ffff:ffff ${is_firefox ? 65534 : 65535} typ relay raddr :: rport 0`
 });
+if (is_firefox) {
+	// Firefox enforces turn permissions locally, so we have to make both sides of the connection aware of fe80::... so that they accept packets from there.
+	await b.addIceCandidate({
+		sdpMLineIndex: 0,
+		candidate: `candidate:f 1 udp 42 fe80::ffff:ffff:ffff:ffff 65534 typ relay raddr :: rport 0`
+	});
+}
 </script>
 
-<!-- Multicast ip -->
+<!-- Relay only a(udp)<->b(tcp) -->
 <script type="_module">
-const t = new RTCPeerConnection(config);
-await t.setRemoteDescription({
-	type: 'offer',
-	sdp: [
-		'v=0',
-		'o=swbrd 42 0 IN IP4 0.0.0.0',
-		's=-',
-		't=0 0',
-		'a=group:BUNDLE dc',
-		'a=fingerprint:sha-256 C3:E4:A4:B9:DD:56:08:7E:A6:15:5E:F7:EB:0F:BD:24:EB:C4:D4:AD:92:33:91:31:F4:37:3E:C5:57:44:11:D5',
-		'a=ice-ufrag:ucCm6JK3s22XuCRiTZVFpWajUq0tIpB7lDn1Sv8dRv3',
-		'a=ice-pwd:the/ice/password/constant',
-		'a=ice-options:trickle',
-		'm=application 42 UDP/DTLS/SCTP webrtc-datachannel',
-		'c=IN IP4 0.0.0.0',
-		'a=candidate:f 1 udp 42 ::ffff:255.255.255.255 65535 typ relay',
-		'a=mid:dc',
-		'a=setup:passive',
-		'a=sctp-port:5000',
-		'',
-	].join('\n')
-});
-await t.setLocalDescription();
-</script>
-
-<!-- Relay only a<->b -->
-<script type="_module">
-const a = new RTCPeerConnection(config);
-const b = new RTCPeerConnection(config);
+const a = new RTCPeerConnection(config(true, true));
+const b = new RTCPeerConnection(config(true, true));
 a.createDataChannel('');
 
 log_everything(a, 'a');
