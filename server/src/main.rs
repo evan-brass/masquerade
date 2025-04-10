@@ -21,7 +21,8 @@ const TURN_KEY: &[u8] = &[
 // - ::ffff:255.255.255.255 failed
 // - ff02::1 failed
 // So we're stuck with frickin fe80::ffff:ffff:ffff:ffff which is reserved because it is the token for UDP (probably, at least if you're 64bit)
-const BROADCAST: IpAddr = IpAddr::V6(Ipv6Addr::new(0xfe80, 0, 0, 0, 0xffff, 0xffff, 0xffff, 0xffff));
+const BROADCAST: IpAddr = IpAddr::V6(Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 1));
+const BROADCAST_FF: IpAddr = IpAddr::V6(Ipv6Addr::new(0xfe80, 0, 0, 0, 0xffff, 0xffff, 0xffff, 0xffff));
 const LINK_LOCAL_OCTETS: [u8; 16] = Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 0).octets();
 
 fn would_block<T>(res: &Result<T, Error>) -> bool {
@@ -220,14 +221,9 @@ impl TurnServer {
 					msg.set_length(0);
 					msg.set_method(Method::Data);
 
-					// I'm experimenting with two broadcast modes:
-					msg.append::<XOR_PEER_ADDRESS, SocketAddr>(&match (peer.ip(), peer.port()) {
-						// Mode 1: Preserve sender
-						(BROADCAST, 65535) => sender,
-						// Mode 2: Firefox by-port
-						(BROADCAST, _) => SocketAddr::new(BROADCAST, sender.port()),
-
-						// Non-broadcast
+					// We have two modes of broadcast: one preserves the sender address (just like unicast) the other masks the ip and identifies connections via port.
+					msg.append::<XOR_PEER_ADDRESS, SocketAddr>(&match peer.ip() {
+						BROADCAST_FF => SocketAddr::new(BROADCAST_FF, sender.port()),
 						_ => sender
 					})
 						.unwrap();
@@ -250,14 +246,15 @@ impl TurnServer {
 		let frame = Rc::from(&msg.buffer[..msg.len()]);
 
 		match (receiver.ip(), receiver.port()) {
-			//
-			(BROADCAST, 65535 | 65534) => {
+			// Broadcast
+			(BROADCAST, _) |
+			(BROADCAST_FF, 65535) => {
 				for turn in self.streams.values_mut() {
 					turn.send(&frame);
 				}
 			}
 			// Fucked up hack to support firefox
-			(BROADCAST, port) => {
+			(BROADCAST_FF, port) => {
 				for turn in self.streams.values_mut() {
 					if turn.port == port {
 						turn.send(&frame);
@@ -271,8 +268,8 @@ impl TurnServer {
 				turn.send(&frame);
 			}
 			// UDP unicast
-			(ip, port) => {
-				let _ = self.udp.send_to(&frame, SocketAddr::new(ip, port));
+			_ => {
+				let _ = self.udp.send_to(&frame, receiver);
 			}
 		}
 	}
@@ -311,7 +308,7 @@ impl TurnServer {
 							poll.registry().register(&mut stream, Token(token), Interest::READABLE | Interest::WRITABLE)?;
 							slot.insert(Turn {
 								stream,
-								port: random(),
+								port: random::<u16>() % 65535,
 								partial: None
 							});
 						}

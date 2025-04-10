@@ -2,12 +2,18 @@
 <script>
 const is_firefox = typeof RTCPeerConnection.prototype.getIdentityAssertion == 'function';
 
-function config(tcp = is_firefox, relay_only = !is_firefox) {
+function config({
+	tcp = is_firefox,
+	// Firefox gets confused when a relay candidate becomes prflx when the policy is 'relay':  Chrome keeps using it, firefox stops using it.
+	itp = is_firefox ? 'all' : 'relay',
+	host = 'localhost',
+	// host = 'stun.evan-brass.net',
+} = {}) {
 	return {
-		iceTransportPolicy: relay_only ? 'relay' : 'all',
+		iceTransportPolicy: itp,
 		iceServers: [{
 			urls: [
-				`turn:localhost${tcp ? '?transport=tcp' : ''}`
+				`turn:${host}${tcp ? '?transport=tcp' : ''}`
 			],
 			username: 'guest',
 			credential: 'password',
@@ -30,8 +36,8 @@ function log_everything(conn, label = conn.pid) {
 
 <!-- Broadcast autodiscovery -->
 <script type="module">
-const a = new RTCPeerConnection(config(true));
-const b = new RTCPeerConnection(config(true));
+const a = new RTCPeerConnection(config({tcp: true}));
+const b = new RTCPeerConnection(config({tcp: true}));
 a.createDataChannel('');
 
 log_everything(a, 'a');
@@ -43,13 +49,13 @@ await b.setLocalDescription();
 await a.setRemoteDescription(b.localDescription);
 await a.addIceCandidate({
 	sdpMLineIndex: 0,
-	candidate: `candidate:f 1 udp 42 fe80::ffff:ffff:ffff:ffff ${is_firefox ? 65534 : 65535} typ relay raddr :: rport 0`
+	candidate: `candidate:f 1 udp 42 ${is_firefox ? 'fe80::ffff:ffff:ffff:ffff' : 'ff02::1'} 65535 typ relay raddr :: rport 0`
 });
 if (is_firefox) {
 	// Firefox enforces turn permissions locally, so we have to make both sides of the connection aware of fe80::... so that they accept packets from there.
 	await b.addIceCandidate({
 		sdpMLineIndex: 0,
-		candidate: `candidate:f 1 udp 42 fe80::ffff:ffff:ffff:ffff 65534 typ relay raddr :: rport 0`
+		candidate: `candidate:f 1 udp 42 fe80::ffff:ffff:ffff:ffff 65535 typ relay raddr :: rport 0`
 	});
 }
 </script>
