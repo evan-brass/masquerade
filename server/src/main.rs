@@ -1,13 +1,15 @@
 use eyre::Result;
 use rand::random;
 use stun::{Stun, Class, Method, attr::{*, parse::AttrIter as _, integrity::Integrity}};
-use std::{collections::BTreeMap, io::{Error, ErrorKind, Read as _, Write as _}, net::{IpAddr, Ipv6Addr}};
+use tracing_subscriber::{layer::SubscriberExt, EnvFilter};
+use std::{collections::{btree_map::OccupiedEntry, BTreeMap}, io::{Error, ErrorKind, Read as _, Write as _}, net::{IpAddr, Ipv6Addr}};
 use std::net::SocketAddr;
 use std::rc::Rc;
 use mio::event::Source as _;
 use mio::net::{TcpListener, TcpStream, UdpSocket};
 use mio::{Events, Poll, Interest, Token};
 use std::collections::btree_map::Entry;
+use tracing::{info, trace};
 
 // Constants used by this server
 const TURN_REALM: &str = "none";
@@ -48,7 +50,7 @@ impl Turn {
 		match res {
 			Ok(written) if written < frame.len() => self.partial = Some((written, frame.clone())),
 			Err(e) => {
-				println!("{e:?}");
+				info!("{e:?}");
 			}
 			_ => {}
 		}
@@ -58,9 +60,8 @@ impl Turn {
 struct TurnServer {
 	udp: UdpSocket,
 	tcp: TcpListener,
-	// NOTE: streams must be sorted by Turn.addr, and
 	streams: BTreeMap<u64, Turn>,
-	// TODO: Add DTLS state
+	// TODO: Add DTLS state somewhere
 }
 const UDP: usize = usize::MAX;
 const TCP: usize = usize::MAX - 1;
@@ -212,6 +213,8 @@ impl TurnServer {
 					}, peer.port());
 					receiver = peer;
 
+					trace!("Relay {} data {sender} -> {receiver}", data.len());
+
 					// [ STUN Header | XOR Peer Attr | Data... ]
 
 					// Shift the data attribute to where we want it
@@ -281,6 +284,15 @@ impl TurnServer {
 		let mut events = Events::with_capacity(128);
 		self.udp.register(poll.registry(), Token(UDP), Interest::READABLE)?;
 		self.tcp.register(poll.registry(), Token(TCP), Interest::READABLE)?;
+
+		// Handle closing tcp streams:
+		fn close(mut entry: OccupiedEntry<u64, Turn>, poll: &Poll) -> Result<()> {
+			info!("Close ({}, {})", entry.key(), entry.get().port);
+			poll.registry().deregister(&mut entry.get_mut().stream)?;
+			entry.remove();
+			Ok(())
+		}
+
 		loop {
 			for e in events.iter() {
 				match e.token().0 {
@@ -298,17 +310,19 @@ impl TurnServer {
 						let res = self.tcp.accept();
 						if would_block(&res) { break }
 
-						let (mut stream, _) = res?;
+						let (mut stream, addr) = res?;
 						stream.set_nodelay(true)?;
 
 						let token = random::<u64>() as usize % TCP;
 						let key = token as u64;
 
 						if let Entry::Vacant(slot) = self.streams.entry(key) {
+							let port = random::<u16>() % 65535;
+							info!("Open ({key}, {port}) - {addr}");
 							poll.registry().register(&mut stream, Token(token), Interest::READABLE | Interest::WRITABLE)?;
 							slot.insert(Turn {
 								stream,
-								port: random::<u16>() % 65535,
+								port,
 								partial: None
 							});
 						}
@@ -322,10 +336,8 @@ impl TurnServer {
 							match turn.stream.write(rest) {
 								Ok(written) if written < rest.len() => turn.partial = Some((offset + written, buffer)),
 								Err(e) if e.kind() == ErrorKind::WouldBlock => turn.partial = Some((offset, buffer)),
-								Err(e) => {
-									println!("{e:?}");
-									poll.registry().deregister(&mut turn.stream)?;
-									entry.remove();
+								Err(_) => {
+									close(entry, &poll)?;
 									break;
 								}
 								_ => {}
@@ -342,9 +354,8 @@ impl TurnServer {
 
 						// Handle streams being closed / erroring out
 						let Ok(len) = res else {
-							poll.registry().deregister(&mut turn.stream)?;
-							entry.remove();
-							break;
+							close(entry, &poll)?;
+							break
 						};
 
 						// We can't read the msg_len of this packet until we have at least 4 bytes
@@ -353,8 +364,7 @@ impl TurnServer {
 
 						// Close connection if message is too large for our buffer
 						if msg_len > buffer.len() {
-							poll.registry().deregister(&mut turn.stream)?;
-							entry.remove();
+							close(entry, &poll)?;
 							break
 						}
 
@@ -383,6 +393,13 @@ impl TurnServer {
 }
 
 fn main() -> Result<std::convert::Infallible> {
+	// Enable logging
+	tracing::subscriber::set_global_default(
+		tracing_subscriber::registry()
+		.with(tracing_subscriber::fmt::layer())
+		.with(EnvFilter::from_default_env())
+	)?;
+
 	let addr = "[::]:3478".parse()?;
 	let server = TurnServer::new(addr)?;
 	server.run()
