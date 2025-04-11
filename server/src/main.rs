@@ -9,7 +9,7 @@ use mio::event::Source as _;
 use mio::net::{TcpListener, TcpStream, UdpSocket};
 use mio::{Events, Poll, Interest, Token};
 use std::collections::btree_map::Entry;
-use tracing::{info, trace};
+use tracing::{debug, info, trace};
 
 // Constants used by this server
 const TURN_REALM: &str = "none";
@@ -25,7 +25,19 @@ const TURN_KEY: &[u8] = &[
 // So we're stuck with frickin fe80::ffff:ffff:ffff:ffff which is reserved because it is the token for UDP (probably, at least if you're 64bit)
 const BROADCAST: IpAddr = IpAddr::V6(Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 1));
 const BROADCAST_FF: IpAddr = IpAddr::V6(Ipv6Addr::new(0xfe80, 0, 0, 0, 0xffff, 0xffff, 0xffff, 0xffff));
-const LINK_LOCAL_OCTETS: [u8; 16] = Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 0).octets();
+
+// We assign a link-local ip for each tcp stream u64 <-> Link local ip
+fn make_ip(id: u64) -> IpAddr {
+	let mut octets = [0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+	octets[8..].copy_from_slice(&id.to_ne_bytes());
+	IpAddr::V6(Ipv6Addr::from(octets))
+}
+fn get_key(ip: IpAddr) -> Option<u64> {
+	match ip {
+		IpAddr::V6(ip6) if ip6.is_unicast_link_local() => Some(u64::from_ne_bytes(ip6.octets()[8..].try_into().unwrap())),
+		_ => None
+	}
+}
 
 fn would_block<T>(res: &Result<T, Error>) -> bool {
 	match res {
@@ -49,8 +61,8 @@ impl Turn {
 		if would_block(&res) { return }
 		match res {
 			Ok(written) if written < frame.len() => self.partial = Some((written, frame.clone())),
-			Err(e) => {
-				info!("{e:?}");
+			Err(error) => {
+				info!("send failed {error}");
 			}
 			_ => {}
 		}
@@ -100,6 +112,8 @@ impl TurnServer {
 			.parse::<XOR_PEER_ADDRESS, SocketAddr>(&mut xor_peer)
 			.parse::<DATA, &[u8]>(&mut data)
 			.collect_unknown::<8>();
+
+		debug!(class = ?msg.class(), method = ?msg.method(), length = msg.length(), "STUN");
 
 		match (msg.class(), msg.method()) {
 			// Unknown Method
@@ -213,7 +227,12 @@ impl TurnServer {
 					}, peer.port());
 					receiver = peer;
 
-					trace!("Relay {} data {sender} -> {receiver}", data.len());
+					trace!(
+						?sender,
+						?receiver,
+						data,
+						"Relay"
+					);
 
 					// [ STUN Header | XOR Peer Attr | Data... ]
 
@@ -265,13 +284,12 @@ impl TurnServer {
 				}
 			}
 			// TCP unicast
-			(IpAddr::V6(dst), _) if dst.is_unicast_link_local() => {
-				let key = u64::from_be_bytes(dst.octets()[8..].try_into().unwrap());
+			(ip, _) => if let Some(key) = get_key(ip) {
 				let Some(turn) = self.streams.get_mut(&key) else { return };
 				turn.send(&frame);
 			}
 			// UDP unicast
-			_ => {
+			else {
 				let _ = self.udp.send_to(&frame, receiver);
 			}
 		}
@@ -287,7 +305,11 @@ impl TurnServer {
 
 		// Handle closing tcp streams:
 		fn close(mut entry: OccupiedEntry<u64, Turn>, poll: &Poll) -> Result<()> {
-			info!("Close ({}, {})", entry.key(), entry.get().port);
+			info!(
+				key = entry.key(),
+				port = entry.get().port,
+				"Close"
+			);
 			poll.registry().deregister(&mut entry.get_mut().stream)?;
 			entry.remove();
 			Ok(())
@@ -318,7 +340,7 @@ impl TurnServer {
 
 						if let Entry::Vacant(slot) = self.streams.entry(key) {
 							let port = random::<u16>() % 65535;
-							info!("Open ({key}, {port}) - {addr}");
+							info!(key, port, ?addr, "Open");
 							poll.registry().register(&mut stream, Token(token), Interest::READABLE | Interest::WRITABLE)?;
 							slot.insert(Turn {
 								stream,
@@ -333,7 +355,9 @@ impl TurnServer {
 						let turn = entry.get_mut();
 						while let Some((offset, buffer)) = turn.partial.take() {
 							let rest = &buffer[offset..];
-							match turn.stream.write(rest) {
+							let res = turn.stream.write(rest);
+							debug!(key, offset, ?res, "Partial write");
+							match res {
 								Ok(written) if written < rest.len() => turn.partial = Some((offset + written, buffer)),
 								Err(e) if e.kind() == ErrorKind::WouldBlock => turn.partial = Some((offset, buffer)),
 								Err(_) => {
@@ -377,11 +401,7 @@ impl TurnServer {
 						let msg = Stun { buffer: &mut buffer[..] };
 
 						// Construct sender address from key (u64 -> Link Local ip6)
-						let mut octets = LINK_LOCAL_OCTETS;
-						octets[8..].copy_from_slice(&key.to_be_bytes());
-						let sender = SocketAddr::new(IpAddr::V6(
-							Ipv6Addr::from(octets)
-						), turn.port);
+						let sender = SocketAddr::new(make_ip(key), turn.port);
 						self.handle_msg(sender, msg);
 					}
 				}
