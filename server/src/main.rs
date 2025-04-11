@@ -1,4 +1,4 @@
-use eyre::Result;
+use eyre::{eyre, Result};
 use rand::random;
 use stun::{Stun, Class, Method, attr::{*, parse::AttrIter as _, integrity::Integrity}};
 use tracing_subscriber::{layer::SubscriberExt, EnvFilter};
@@ -314,6 +314,28 @@ impl TurnServer {
 			entry.remove();
 			Ok(())
 		}
+		fn read<'i>(turn: &mut Turn, buffer: &'i mut [u8]) -> Result<Option<Stun<&'i mut [u8]>>> {
+			let res = turn.stream.peek(buffer);
+			if would_block(&res) { return Ok(None) }
+
+			// Handle streams being closed / erroring out
+			let len = res?;
+
+			// We can't read the msg_len of this packet until we have at least 4 bytes
+			if len < 4 { return Ok(None) }
+			let msg_len = Stun { buffer: &buffer[..] }.len();
+
+			// Close connection if message is too large for our buffer
+			if msg_len > buffer.len() { return Err(eyre!("Message too large for buffer")); }
+
+			// If we don't have the full message than wait
+			if len < msg_len { return Ok(None) }
+
+			// Consume exactly our message:
+			turn.stream.read_exact(&mut buffer[..msg_len])?;
+
+			Ok(Some(Stun { buffer: &mut buffer[..] }))
+		}
 
 		loop {
 			for e in events.iter() {
@@ -342,11 +364,32 @@ impl TurnServer {
 							let port = random::<u16>() % 65535;
 							info!(key, port, ?addr, "Open");
 							poll.registry().register(&mut stream, Token(token), Interest::READABLE | Interest::WRITABLE)?;
+							// TODO: Would rather use insert_entry
 							slot.insert(Turn {
 								stream,
 								port,
 								partial: None
 							});
+
+							// Immediately start reading the stream
+							loop {
+								let Entry::Occupied(mut entry) = self.streams.entry(key) else {
+									panic!("Where did you put it?")
+								};
+								let turn = entry.get_mut();
+								let sender = SocketAddr::new(make_ip(key), turn.port);
+								match read(turn, &mut buffer) {
+									Err(e) => {
+										debug!(error = ?e, "Stream Errored");
+										close(entry, &poll)?;
+										break
+									},
+									Ok(Some(msg)) => {
+										self.handle_msg(sender, msg);
+									},
+									Ok(None) => break
+								}
+							}
 						}
 					}
 					tok if e.is_writable() => {
@@ -372,37 +415,18 @@ impl TurnServer {
 						let key = tok as u64;
 						let Entry::Occupied(mut entry) = self.streams.entry(key) else { continue };
 						let turn = entry.get_mut();
-
-						let res = turn.stream.peek(&mut buffer);
-						if would_block(&res) { break }
-
-						// Handle streams being closed / erroring out
-						let Ok(len) = res else {
-							close(entry, &poll)?;
-							break
-						};
-
-						// We can't read the msg_len of this packet until we have at least 4 bytes
-						if len < 4 { break }
-						let msg_len = Stun { buffer: &buffer[..] }.len();
-
-						// Close connection if message is too large for our buffer
-						if msg_len > buffer.len() {
-							close(entry, &poll)?;
-							break
-						}
-
-						// If we don't have the full message than wait
-						if len < msg_len { break }
-
-						// Consume exactly our message:
-						turn.stream.read_exact(&mut buffer[..msg_len])?;
-
-						let msg = Stun { buffer: &mut buffer[..] };
-
-						// Construct sender address from key (u64 -> Link Local ip6)
 						let sender = SocketAddr::new(make_ip(key), turn.port);
-						self.handle_msg(sender, msg);
+						match read(turn, &mut buffer) {
+							Err(e) => {
+								debug!(error = ?e, "Stream Errored");
+								close(entry, &poll)?;
+								break
+							},
+							Ok(Some(msg)) => {
+								self.handle_msg(sender, msg);
+							},
+							Ok(None) => break
+						}
 					}
 				}
 			}
