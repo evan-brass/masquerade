@@ -1,14 +1,15 @@
-use eyre::{eyre, Result};
+use eyre::Result;
 use rand::random;
 use stun::{Stun, Class, Method, attr::{*, parse::AttrIter as _, integrity::Integrity}};
 use tracing_subscriber::{layer::SubscriberExt, EnvFilter};
-use std::{collections::{btree_map::OccupiedEntry, BTreeMap}, io::{Error, ErrorKind, Read as _, Write as _}, net::{IpAddr, Ipv6Addr}};
+use std::{collections::BTreeMap, io::{Error, ErrorKind, Read as _, Write as _}, net::{IpAddr, Ipv6Addr}};
 use std::net::SocketAddr;
 use std::rc::Rc;
 use mio::event::Source as _;
 use mio::net::{TcpListener, TcpStream, UdpSocket};
 use mio::{Events, Poll, Interest, Token};
 use std::collections::btree_map::Entry;
+use std::cell::Cell;
 use tracing::{debug, info, trace};
 
 // Constants used by this server
@@ -50,22 +51,59 @@ fn would_block<T>(res: &Result<T, Error>) -> bool {
 struct Turn {
 	port: u16,
 	stream: TcpStream,
-	partial: Option<(usize, Rc<[u8]>)>,
+	partial: Cell<Option<(usize, Rc<[u8]>)>>,
 	// TODO: Firefox enforces permissions, so we also might need a map from SocketAddr -> u16 (pseudo port).  I wonder if we use a sorted map again... then firefox would see the remote port changing as they receive, but... IDK
 }
 impl Turn {
-	pub fn send(&mut self, frame: &Rc<[u8]>) {
-		if self.partial.is_some() { return }
-
-		let res = self.stream.write(frame);
-		if would_block(&res) { return }
+	pub fn read<'i>(&self, buffer: &'i mut [u8]) -> Result<Option<Stun<&'i mut [u8]>>> {
+		let res = self.stream.peek(buffer);
+		trace!(?res, "peek");
+		let msg = Stun{buffer};
+		let exp_len = msg.len();
 		match res {
-			Ok(written) if written < frame.len() => self.partial = Some((written, frame.clone())),
-			Err(error) => {
-				info!("send failed {error}");
+			// exp_len is only set after 4 bytes
+			Ok(peeked) if peeked < 4 => Ok(None),
+			// Read
+			Ok(peeked) if peeked >= exp_len => {
+				(&self.stream).read_exact(&mut msg.buffer[..exp_len])?;
+				Ok(Some(msg))
 			}
-			_ => {}
+			Err(e) if e.kind() != ErrorKind::WouldBlock => Err(e.into()),
+			_ => Ok(None)
 		}
+	}
+	pub fn write(&self) {
+		loop {
+			if let Some((offset, frame)) = self.partial.take() {
+				let rest = &frame[offset..];
+				let res = (&self.stream).write(rest);
+				trace!(?res, "write");
+				match res {
+					// Partial Write
+					Ok(written) if written < rest.len() => {
+						self.partial.set( Some((offset + written, frame)));
+						// Partial writes are the only case where we retry
+						continue;
+					},
+					// Completed Write
+					Ok(_) => {},
+					// Would Block
+					Err(e) if e.kind() == ErrorKind::WouldBlock => self.partial.set(Some((offset, frame))),
+					// Any other error
+					Err(_) => {
+						let _ = self.stream.shutdown(std::net::Shutdown::Both);
+					}
+				}
+			}
+			break;
+		}
+	}
+	pub fn maybe_send(&self, frame: &Rc<[u8]>) {
+		self.partial.set(match self.partial.take() {
+			None => Some((0, frame.clone())),
+			v => v
+		});
+		self.write();
 	}
 }
 
@@ -84,7 +122,7 @@ impl TurnServer {
 		Ok(Self { udp, tcp, streams: BTreeMap::new() })
 	}
 
-	fn handle_msg(&mut self, sender: SocketAddr, mut msg: Stun<&mut [u8]>) {
+	fn handle_msg(&self, sender: SocketAddr, mut msg: Stun<&mut [u8]>) {
 		// Canonical socket address (ipv6-mapped -> ipv4)
 		let canonical = SocketAddr::new(sender.ip().to_canonical(), sender.port());
 
@@ -271,22 +309,23 @@ impl TurnServer {
 			// Broadcast
 			(BROADCAST, _) |
 			(BROADCAST_FF, 65535) => {
-				for turn in self.streams.values_mut() {
-					turn.send(&frame);
+				for turn in self.streams.values() {
+					turn.maybe_send(&frame);
 				}
 			}
 			// Fucked up hack to support firefox
 			(BROADCAST_FF, port) => {
-				for turn in self.streams.values_mut() {
+				for turn in self.streams.values() {
 					if turn.port == port {
-						turn.send(&frame);
+						turn.maybe_send(&frame);
 					}
 				}
 			}
 			// TCP unicast
 			(ip, _) => if let Some(key) = get_key(ip) {
-				let Some(turn) = self.streams.get_mut(&key) else { return };
-				turn.send(&frame);
+				if let Some(turn) = self.streams.get(&key) {
+					turn.maybe_send(&frame);
+				}
 			}
 			// UDP unicast
 			else {
@@ -303,43 +342,10 @@ impl TurnServer {
 		self.udp.register(poll.registry(), Token(UDP), Interest::READABLE)?;
 		self.tcp.register(poll.registry(), Token(TCP), Interest::READABLE)?;
 
-		// Handle closing tcp streams:
-		fn close(mut entry: OccupiedEntry<u64, Turn>, poll: &Poll) -> Result<()> {
-			info!(
-				key = entry.key(),
-				port = entry.get().port,
-				"Close"
-			);
-			poll.registry().deregister(&mut entry.get_mut().stream)?;
-			entry.remove();
-			Ok(())
-		}
-		fn read<'i>(turn: &mut Turn, buffer: &'i mut [u8]) -> Result<Option<Stun<&'i mut [u8]>>> {
-			let res = turn.stream.peek(buffer);
-			if would_block(&res) { return Ok(None) }
-
-			// Handle streams being closed / erroring out
-			let len = res?;
-
-			// We can't read the msg_len of this packet until we have at least 4 bytes
-			if len < 4 { return Ok(None) }
-			let msg_len = Stun { buffer: &buffer[..] }.len();
-
-			// Close connection if message is too large for our buffer
-			if msg_len > buffer.len() { return Err(eyre!("Message too large for buffer")); }
-
-			// If we don't have the full message than wait
-			if len < msg_len { return Ok(None) }
-
-			// Consume exactly our message:
-			turn.stream.read_exact(&mut buffer[..msg_len])?;
-
-			Ok(Some(Stun { buffer: &mut buffer[..] }))
-		}
-
 		loop {
-			for e in events.iter() {
-				match e.token().0 {
+			for event in events.iter() {
+				trace!(?event, "Event");
+				match event.token().0 {
 					UDP => loop {
 						let res = self.udp.recv_from(&mut buffer);
 						if would_block(&res) { break }
@@ -364,73 +370,38 @@ impl TurnServer {
 							let port = random::<u16>() % 65535;
 							info!(key, port, ?addr, "Open");
 							poll.registry().register(&mut stream, Token(token), Interest::READABLE | Interest::WRITABLE)?;
-							// TODO: Would rather use insert_entry
 							slot.insert(Turn {
 								stream,
 								port,
-								partial: None
+								partial: Cell::default()
 							});
-
-							// Immediately start reading the stream
-							loop {
-								let Entry::Occupied(mut entry) = self.streams.entry(key) else {
-									panic!("Where did you put it?")
-								};
-								let turn = entry.get_mut();
+						}
+					}
+					tok => {
+						let key = tok as u64;
+						if let Some(turn) = self.streams.get(&key) {
+							if event.is_writable() { turn.write(); }
+							if event.is_readable() {
 								let sender = SocketAddr::new(make_ip(key), turn.port);
-								match read(turn, &mut buffer) {
-									Err(e) => {
-										debug!(error = ?e, "Stream Errored");
-										close(entry, &poll)?;
-										break
-									},
-									Ok(Some(msg)) => {
-										self.handle_msg(sender, msg);
-									},
-									Ok(None) => break
+								loop {
+									match turn.read(&mut buffer) {
+										Ok(Some(msg)) => self.handle_msg(sender, msg),
+										Ok(None) => break,
+										Err(error) => {
+											let Some(Turn{ mut stream, port, ..}) = self.streams.remove(&key) else { break };
+											poll.registry().deregister(&mut stream)?;
+											info!(key, port, ?error, "Close");
+											break;
+										}
+									}
 								}
 							}
-						}
-					}
-					tok if e.is_writable() => {
-						let key = tok as u64;
-						let Entry::Occupied(mut entry) = self.streams.entry(key) else { continue };
-						let turn = entry.get_mut();
-						while let Some((offset, buffer)) = turn.partial.take() {
-							let rest = &buffer[offset..];
-							let res = turn.stream.write(rest);
-							debug!(key, offset, ?res, "Partial write");
-							match res {
-								Ok(written) if written < rest.len() => turn.partial = Some((offset + written, buffer)),
-								Err(e) if e.kind() == ErrorKind::WouldBlock => turn.partial = Some((offset, buffer)),
-								Err(_) => {
-									close(entry, &poll)?;
-									break;
-								}
-								_ => {}
-							}
-						}
-					}
-					tok => loop {
-						let key = tok as u64;
-						let Entry::Occupied(mut entry) = self.streams.entry(key) else { continue };
-						let turn = entry.get_mut();
-						let sender = SocketAddr::new(make_ip(key), turn.port);
-						match read(turn, &mut buffer) {
-							Err(e) => {
-								debug!(error = ?e, "Stream Errored");
-								close(entry, &poll)?;
-								break
-							},
-							Ok(Some(msg)) => {
-								self.handle_msg(sender, msg);
-							},
-							Ok(None) => break
 						}
 					}
 				}
 			}
 
+			trace!("Poll");
 			poll.poll(&mut events, None)?;
 		}
 	}
