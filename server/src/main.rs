@@ -380,20 +380,19 @@ impl TurnServer {
 					}
 					tok => {
 						let key = tok as u64;
-						if let Some(turn) = self.streams.get(&key) {
-							if event.is_writable() { turn.write(); }
-							if event.is_readable() {
-								let sender = SocketAddr::new(make_ip(key), turn.port);
-								loop {
-									match turn.read(&mut buffer) {
-										Ok(Some(msg)) => self.handle_msg(sender, msg),
-										Ok(None) => break,
-										Err(error) => {
-											let Some(Turn{ mut stream, port, ..}) = self.streams.remove(&key) else { break };
-											poll.registry().deregister(&mut stream)?;
-											info!(key, port, ?error, "Close");
-											break;
-										}
+						let Some(turn) = self.streams.get(&key) else { continue };
+						if event.is_writable() { turn.write(); }
+						if event.is_readable() {
+							let sender = SocketAddr::new(make_ip(key), turn.port);
+							loop {
+								match turn.read(&mut buffer) {
+									Ok(Some(msg)) => self.handle_msg(sender, msg),
+									Ok(None) => break,
+									Err(error) => {
+										let Turn{ mut stream, port, ..} = self.streams.remove(&key).unwrap();
+										poll.registry().deregister(&mut stream)?;
+										info!(key, port, ?error, "Close");
+										break;
 									}
 								}
 							}
