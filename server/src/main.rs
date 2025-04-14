@@ -1,5 +1,5 @@
 use eyre::Result;
-use rand::random;
+use rand::random_range;
 use stun::{Stun, Class, Method, attr::{*, parse::AttrIter as _, integrity::Integrity}};
 use tracing_subscriber::{layer::SubscriberExt, EnvFilter};
 use std::{collections::BTreeMap, io::{Error, ErrorKind, Read as _, Write as _}, net::{IpAddr, Ipv6Addr}};
@@ -363,11 +363,12 @@ impl TurnServer {
 						let (mut stream, addr) = res?;
 						stream.set_nodelay(true)?;
 
-						let token = random::<u64>() as usize % TCP;
+						let token = random_range(0..TCP);
 						let key = token as u64;
 
 						if let Entry::Vacant(slot) = self.streams.entry(key) {
-							let port = random::<u16>() % 65535;
+							// Coturn's default port range is 49152-65535.  Ours is 49152-65534, because 65535 is broadcast.
+							let port = random_range(49152..65535);
 							info!(key, port, ?addr, "Open");
 							poll.registry().register(&mut stream, Token(token), Interest::READABLE | Interest::WRITABLE)?;
 							slot.insert(Turn {
