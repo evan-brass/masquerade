@@ -1,4 +1,4 @@
-use eyre::Result;
+use eyre::{eyre, Result};
 use rand::random_range;
 use stun::{Stun, Class, Method, attr::{*, parse::AttrIter as _, integrity::Integrity}};
 use tracing_subscriber::{layer::SubscriberExt, EnvFilter};
@@ -20,6 +20,8 @@ const TURN_USER: &str = "guest";
 const TURN_KEY: &[u8] = &[
 	0x01, 0x5c, 0x8a, 0x97, 0x3e, 0xa4, 0xb4, 0xa9, 0xc9, 0x45, 0xf6, 0x90, 0x14, 0x2b, 0xf3, 0xad,
 ];
+const ICE_KEY: &[u8] = b"the/ice/password/constant";
+
 // FUCK: Firefox seems to dislike broadcast addresses so none of my favorite options worked:
 // - ::ffff:255.255.255.255 failed
 // - ff02::1 failed
@@ -61,6 +63,7 @@ impl Turn {
 		let msg = Stun{buffer};
 		let exp_len = msg.len();
 		match res {
+			_ if exp_len > msg.buffer.len() => Err(eyre!("STUN message exceeds buffer")),
 			// exp_len is only set after 4 bytes
 			Ok(peeked) if peeked < 4 => Ok(None),
 			// Read
@@ -257,47 +260,155 @@ impl TurnServer {
 
 			// Send
 			(Class::Indication, Method::Send) => {
-				if let (Some(peer), Some(data)) = (xor_peer, data) {
-					// Our sockets should be dual stack so we want ip6-mapped:
-					let peer = SocketAddr::new(match peer.ip() {
-						IpAddr::V4(v4) => v4.to_ipv6_mapped().into(),
-						v => v
-					}, peer.port());
-					receiver = peer;
+				let (Some(peer), Some(data)) = (xor_peer, data) else { return };
+				// Our sockets should be dual stack so we want ip6-mapped:
+				let peer = SocketAddr::new(match peer.ip() {
+					IpAddr::V4(v4) => v4.to_ipv6_mapped().into(),
+					v => v
+				}, peer.port());
 
-					trace!(
-						?sender,
-						?receiver,
-						data,
-						"Relay"
-					);
+				// Shift the data attribute to where we want it
+				// [ STUN Header | XOR Peer Attr | Data... ]
+				let mut len = data.len();
+				let i = data.as_ptr() as usize - 4 - msg.buffer.as_ptr() as usize;
+				msg.buffer.copy_within(i..i + 4 + len, 44);
+				msg.set_length(0);
+				msg.set_method(Method::Data);
+				let data = &mut msg.buffer[48..][..len];
 
-					// [ STUN Header | XOR Peer Attr | Data... ]
+				// Peek at the data
+				match (peer.ip(), peer.port(), data.first()) {
+					// Drop empty datagrams
+					(_, _, None) => return,
 
-					// Shift the data attribute to where we want it
-					let len = data.len();
-					let i = data.as_ptr() as usize - 4 - msg.buffer.as_ptr() as usize;
-					msg.buffer.copy_within(i..i + 4 + len, 44);
-					msg.set_length(0);
-					msg.set_method(Method::Data);
+					// Broadcast STUN
+					(BROADCAST | BROADCAST_FF, 65535, Some(0..3)) => {
+						let mut inner = Stun {buffer: &mut msg.buffer[48..]};
+						if inner.len() != len { return }
+						if inner.class() != Class::Request || inner.method() != Method::Binding { return }
 
-					// We have two modes of broadcast: one preserves the sender address (just like unicast) the other masks the ip and identifies connections via port.
-					msg.append::<XOR_PEER_ADDRESS, SocketAddr>(&match peer.ip() {
-						BROADCAST_FF => SocketAddr::new(BROADCAST_FF, sender.port()),
-						_ => sender
-					})
-						.unwrap();
+						// Parse ICE attributes
+						let mut username = None;
+						let mut integrity = None;
+						let mut ice_controlled = None;
+						let mut ice_controlling = None;
+						let mut priority = None;
+						let mut use_candidate = None;
+						let mut fingerprint = None;
+						let unknowns = inner
+							.into_iter()
+							.parse::<USERNAME, &str>(&mut username)
+							.parse::<MESSAGE_INTEGRITY, Integrity<20>>(&mut integrity)
+							.parse::<ICE_CONTROLLED, u64>(&mut ice_controlled)
+							.parse::<ICE_CONTROLLING, u64>(&mut ice_controlling)
+							.parse::<PRIORITY, u32>(&mut priority)
+							.parse::<USE_CANDIDATE, ()>(&mut use_candidate)
+							.parse::<FINGERPRINT, ()>(&mut fingerprint)
+							.collect_unknown::<1>();
 
-					// Zero out the padding bytes:
-					let padding = (4 - len % 4) % 4;
-					msg.buffer[48 + len..][..padding].fill(0);
+						if unknowns.is_some() { return }
 
-					// Write the length of the Data attribute and update the length of the STUN packet
-					msg.buffer[46..48].copy_from_slice(&u16::to_be_bytes(len as u16));
-					msg.set_length(28 + (len + padding) as u16);
-				} else {
-					return;
+						// Make sure all expected attributes are present and no unexpected attributes exist
+						let (None, Some(username), Some(integrity), Some(_), Some(_), Some(())) = (
+							unknowns,
+							username,
+							integrity,
+							ice_controlled.xor(ice_controlling),
+							priority,
+							fingerprint,
+						) else { return };
+
+						// Split the username into dst_ufrag and src_ufrag
+						let Some((dst_ufrag, src_ufrag)) = username.split_once(':') else { return };
+						debug!(dst_ufrag, src_ufrag, "ICE");
+
+						// Handle hosted ICE
+						if dst_ufrag == "ucCm6JK3s22XuCRiTZVFpWajUq0tIpB7lDn1Sv8dRv3" {
+							// Wrong credentials
+							if !integrity.verify(&ICE_KEY) {
+								inner.set_length(0);
+								inner.set_class(Class::Error);
+								inner.append::<ERROR_CODE, _>(&(441, "")).unwrap();
+								inner.append::<FINGERPRINT, _>(&()).unwrap();
+								trace!("ICE Error 441");
+							}
+							// ICE Controlled - error switch role
+							else if ice_controlled.is_some() {
+								if peer.ip() == BROADCAST_FF {
+									let username = format!("{src_ufrag}:{dst_ufrag}");
+									inner.set_length(0);
+									inner.append::<USERNAME, &str>(&username.as_str()).unwrap();
+									inner.append::<ICE_CONTROLLED, u64>(&u64::MIN).unwrap();
+									// inner.append::<PRIORITY, u32>(&0xdeadbeef).unwrap();
+									inner.append::<MESSAGE_INTEGRITY, _>(&ICE_KEY).unwrap();
+									inner.append::<FINGERPRINT, _>(&()).unwrap();
+									debug!("ICE Firefox role conflict");
+								}
+								else {
+									inner.set_length(0);
+									inner.set_class(Class::Error);
+									inner.append::<ERROR_CODE, _>(&(487, "")).unwrap();
+									inner.append::<MESSAGE_INTEGRITY, _>(&ICE_KEY).unwrap();
+									inner.append::<FINGERPRINT, _>(&()).unwrap();
+									trace!("ICE Error 487");
+								}
+							}
+							// Success
+							else {
+								inner.set_length(0);
+								inner.set_class(Class::Success);
+								inner
+									.append::<XOR_MAPPED_ADDRESS, SocketAddr>(&sender.into())
+									.unwrap();
+								inner.append::<MESSAGE_INTEGRITY, _>(&ICE_KEY).unwrap();
+								inner.append::<FINGERPRINT, _>(&()).unwrap();
+								trace!("ICE Success");
+							}
+
+							len = inner.len();
+							msg.append::<XOR_PEER_ADDRESS, SocketAddr>(&peer)
+								.unwrap();
+						}
+
+						// Broadcast unknown ICE tests
+						else {
+							receiver = peer;
+							msg.append::<XOR_PEER_ADDRESS, SocketAddr>(&match peer.ip() {
+								BROADCAST_FF => SocketAddr::new(BROADCAST_FF, sender.port()),
+								_ => sender
+							})
+								.unwrap();
+						}
+					}
+
+					// Hosted DTLS
+					(BROADCAST | BROADCAST_FF, 65535, Some(20..64)) => {
+						trace!(?data, "DTLS");
+						return;
+					}
+
+					// Drop all other would-be broadcasts
+					(BROADCAST, _, _) |
+					(BROADCAST_FF, 65535, _) => return,
+
+					// Unicast / Firefox crap
+					_ => {
+						receiver = peer;
+						msg.append::<XOR_PEER_ADDRESS, SocketAddr>(&match peer.ip() {
+							BROADCAST_FF => SocketAddr::new(BROADCAST_FF, sender.port()),
+							_ => sender
+						})
+							.unwrap();
+					}
 				}
+
+				// Zero out the padding bytes:
+				let padding = (4 - len % 4) % 4;
+				msg.buffer[48 + len..][..padding].fill(0);
+
+				// Write the length of the Data attribute and update the length of the STUN packet
+				msg.buffer[46..48].copy_from_slice(&u16::to_be_bytes(len as u16));
+				msg.set_length(28 + (len + padding) as u16);
 			}
 
 			_ => return,
