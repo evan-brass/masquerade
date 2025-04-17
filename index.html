@@ -53,26 +53,6 @@ await h.addIceCandidate(broadcast);
 console.log(h.localDescription);
 </script>
 
-<!-- ICE broadcast -->
-<script type="_module">
-const a = new RTCPeerConnection(config);
-const b = new RTCPeerConnection(config);
-a.createDataChannel('');
-
-a.addEventListener('connectionstatechange', ({ target: { connectionState } }) => console.log('a', connectionState));
-b.addEventListener('connectionstatechange', ({ target: { connectionState } }) => console.log('b', connectionState));
-
-(async () => {
-	await a.setLocalDescription();
-	await b.setRemoteDescription(a.localDescription);
-	await b.setLocalDescription();
-	await a.setRemoteDescription(b.localDescription);
-
-	await a.addIceCandidate(broadcast);
-	if (is_firefox) await b.addIceCandidate(broadcast);
-})();
-</script>
-
 <!-- Broadcast autodiscovery -->
 <script type="_module">
 const a = new RTCPeerConnection(config);
