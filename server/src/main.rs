@@ -15,11 +15,6 @@ use tracing::{debug, info, trace};
 // Constants used by this server
 const TURN_REALM: &str = "none";
 const TURN_NONCE: &str = "none";
-const TURN_USER: &str = "guest";
-// turn_key = md5("guest:none:password")
-const TURN_KEY: &[u8] = &[
-	0x01, 0x5c, 0x8a, 0x97, 0x3e, 0xa4, 0xb4, 0xa9, 0xc9, 0x45, 0xf6, 0x90, 0x14, 0x2b, 0xf3, 0xad,
-];
 const ICE_KEY: &[u8] = b"the/ice/password/constant";
 
 // FUCK: Firefox seems to dislike broadcast addresses so none of my favorite options worked:
@@ -156,6 +151,18 @@ impl TurnServer {
 
 		debug!(class = ?msg.class(), method = ?msg.method(), length = msg.length(), "STUN");
 
+		// Compute a long-term key for authentication
+		let turn_key = if let (Some(username), Some(realm)) = (username, realm) {
+			let mut ctx = md5::Context::new();
+			ctx.consume(username);
+			ctx.consume(":");
+			ctx.consume(realm);
+			ctx.consume(":password");
+			ctx.compute().0
+		} else {
+			[0; 16]
+		};
+
 		match (msg.class(), msg.method()) {
 			// Unknown Method
 			(Class::Request, meth)
@@ -199,13 +206,11 @@ impl TurnServer {
 				msg.append::<NONCE, _>(&TURN_NONCE).unwrap();
 			}
 			// - Wrong Username or Password
-			(Class::Request, _)
-				if username != Some(TURN_USER)
-					|| !integrity.is_some_and(|i| i.verify(TURN_KEY)) =>
+			(Class::Request, _) if !integrity.is_some_and(|i| i.verify(&turn_key)) =>
 			{
 				msg.set_length(0);
 				msg.set_class(Class::Error);
-				msg.append::<ERROR_CODE, _>(&(441, "guest:none:password"))
+				msg.append::<ERROR_CODE, _>(&(441, ""))
 					.unwrap();
 			}
 
@@ -215,7 +220,7 @@ impl TurnServer {
 				msg.set_length(0);
 				msg.set_class(Class::Error);
 				msg.append::<ERROR_CODE, _>(&(442, "")).unwrap();
-				msg.append::<MESSAGE_INTEGRITY, _>(&TURN_KEY).unwrap();
+				msg.append::<MESSAGE_INTEGRITY, _>(&turn_key.as_slice()).unwrap();
 			}
 			// - Normal
 			(Class::Request, Method::Allocate) => {
@@ -226,7 +231,7 @@ impl TurnServer {
 					.unwrap();
 				msg.append::<LIFETIME, _>(&lifetime.unwrap_or(1000))
 					.unwrap();
-				msg.append::<MESSAGE_INTEGRITY, _>(&TURN_KEY).unwrap();
+				msg.append::<MESSAGE_INTEGRITY, _>(&turn_key.as_slice()).unwrap();
 			}
 
 			// Refresh
@@ -238,7 +243,7 @@ impl TurnServer {
 				msg.set_class(Class::Success);
 				msg.append::<LIFETIME, _>(&lifetime.unwrap_or(1000))
 					.unwrap();
-				msg.append::<MESSAGE_INTEGRITY, _>(&TURN_KEY).unwrap();
+				msg.append::<MESSAGE_INTEGRITY, _>(&turn_key.as_slice()).unwrap();
 			}
 
 			// Create Permission
@@ -246,7 +251,7 @@ impl TurnServer {
 				// We don't enforce permissions so... success.
 				msg.set_length(0);
 				msg.set_class(Class::Success);
-				msg.append::<MESSAGE_INTEGRITY, _>(&TURN_KEY).unwrap();
+				msg.append::<MESSAGE_INTEGRITY, _>(&turn_key.as_slice()).unwrap();
 			}
 
 			// Channel Bind
@@ -255,7 +260,7 @@ impl TurnServer {
 				msg.set_length(0);
 				msg.set_class(Class::Error);
 				msg.append::<ERROR_CODE, _>(&(438, "")).unwrap();
-				msg.append::<MESSAGE_INTEGRITY, _>(&TURN_KEY).unwrap();
+				msg.append::<MESSAGE_INTEGRITY, _>(&turn_key.as_slice()).unwrap();
 			}
 
 			// Send
