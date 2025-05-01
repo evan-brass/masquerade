@@ -13,8 +13,6 @@ use std::cell::Cell;
 use tracing::{debug, info, trace};
 
 // Constants used by this server
-const TURN_REALM: &str = "none";
-const TURN_NONCE: &str = "none";
 const ICE_KEY: &[u8] = b"the/ice/password/constant";
 
 // FUCK: Firefox seems to dislike broadcast addresses so none of my favorite options worked:
@@ -197,13 +195,13 @@ impl TurnServer {
 			}
 
 			// All future requests require authentication:
-			// - Realm or nonce missing / wrong
-			(Class::Request, _) if realm != Some(TURN_REALM) || nonce != Some(TURN_NONCE) => {
+			// - Missing realm
+			(Class::Request, _) if realm.is_none() => {
 				msg.set_length(0);
 				msg.set_class(Class::Error);
 				msg.append::<ERROR_CODE, _>(&(401, "")).unwrap();
-				msg.append::<REALM, _>(&TURN_REALM).unwrap();
-				msg.append::<NONCE, _>(&TURN_NONCE).unwrap();
+				msg.append::<REALM, _>(&"none").unwrap();
+				msg.append::<NONCE, _>(&"none").unwrap();
 			}
 			// - Wrong Username or Password
 			(Class::Request, _) if !integrity.is_some_and(|i| i.verify(&turn_key)) =>
