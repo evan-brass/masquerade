@@ -11,6 +11,7 @@ use mio::{Events, Poll, Interest, Token};
 use std::collections::btree_map::Entry;
 use std::cell::Cell;
 use tracing::{debug, info, trace};
+type Never = core::convert::Infallible;
 
 // Constants used by this server
 const ICE_KEY: &[u8] = b"the/ice/password/constant";
@@ -446,7 +447,7 @@ impl TurnServer {
 		}
 	}
 
-	pub fn run(mut self) -> Result<std::convert::Infallible> {
+	pub fn run(mut self) -> Result<Never> {
 		let mut buffer = [0; 2048];
 		let mut poll = Poll::new()?;
 
@@ -522,7 +523,7 @@ impl TurnServer {
 	}
 }
 
-fn main() -> Result<std::convert::Infallible> {
+fn main() -> Result<Never> {
 	// Enable logging
 	tracing::subscriber::set_global_default(
 		tracing_subscriber::registry()
