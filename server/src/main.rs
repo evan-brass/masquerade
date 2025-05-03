@@ -46,6 +46,7 @@ fn would_block<T>(res: &Result<T, Error>) -> bool {
 struct Turn {
 	port: u16,
 	stream: TcpStream,
+	canonical: SocketAddr,
 	partial: Cell<Option<(usize, Rc<[u8]>)>>,
 	// TODO: Firefox enforces permissions, so we also might need a map from SocketAddr -> u16 (pseudo port).  I wonder if we use a sorted map again... then firefox would see the remote port changing as they receive, but... IDK
 }
@@ -118,10 +119,7 @@ impl TurnServer {
 		Ok(Self { udp, tcp, streams: BTreeMap::new() })
 	}
 
-	fn handle_msg(&self, sender: SocketAddr, mut msg: Stun<&mut [u8]>) {
-		// Canonical socket address (ipv6-mapped -> ipv4)
-		let canonical = SocketAddr::new(sender.ip().to_canonical(), sender.port());
-
+	fn handle_msg(&self, sender: SocketAddr, canonical: SocketAddr, mut msg: Stun<&mut [u8]>) {
 		let mut receiver = sender;
 
 		// Parse TURN attributes
@@ -465,9 +463,10 @@ impl TurnServer {
 						if would_block(&res) { break }
 
 						let (len, sender) = res?;
+						let canonical = SocketAddr::new(sender.ip().to_canonical(), sender.port());
 						let msg = Stun{ buffer: &mut buffer[..] };
 						if msg.len() == len {
-							self.handle_msg(sender, msg);
+							self.handle_msg(sender, canonical, msg);
 						}
 					}
 					TCP => loop {
@@ -475,6 +474,7 @@ impl TurnServer {
 						if would_block(&res) { break }
 
 						let (mut stream, addr) = res?;
+						let canonical = SocketAddr::new(addr.ip().to_canonical(), addr.port());
 						stream.set_nodelay(true)?;
 
 						let token = random_range(0..TCP);
@@ -487,6 +487,7 @@ impl TurnServer {
 							poll.registry().register(&mut stream, Token(token), Interest::READABLE | Interest::WRITABLE)?;
 							slot.insert(Turn {
 								stream,
+								canonical,
 								port,
 								partial: Cell::default()
 							});
@@ -500,7 +501,7 @@ impl TurnServer {
 							let sender = SocketAddr::new(make_ip(key), turn.port);
 							loop {
 								match turn.read(&mut buffer) {
-									Ok(Some(msg)) => self.handle_msg(sender, msg),
+									Ok(Some(msg)) => self.handle_msg(sender, turn.canonical, msg),
 									Ok(None) => break,
 									Err(error) => {
 										let Turn{ mut stream, port, ..} = self.streams.remove(&key).unwrap();
