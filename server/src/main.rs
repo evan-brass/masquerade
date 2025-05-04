@@ -10,18 +10,12 @@ use mio::net::{TcpListener, TcpStream, UdpSocket};
 use mio::{Events, Poll, Interest, Token};
 use std::collections::btree_map::Entry;
 use std::cell::Cell;
-use tracing::{debug, info, trace};
+use tracing::{debug, info, trace, warn};
 type Never = core::convert::Infallible;
 
 // Constants used by this server
 const ICE_KEY: &[u8] = b"the/ice/password/constant";
-
-// FUCK: Firefox seems to dislike broadcast addresses so none of my favorite options worked:
-// - ::ffff:255.255.255.255 failed
-// - ff02::1 failed
-// So we're stuck with frickin fe80::ffff:ffff:ffff:ffff which is reserved because it is the token for UDP (probably, at least if you're 64bit)
-const BROADCAST: IpAddr = IpAddr::V6(Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 1));
-const BROADCAST_FF: IpAddr = IpAddr::V6(Ipv6Addr::new(0xfe80, 0, 0, 0, 0xffff, 0xffff, 0xffff, 0xffff));
+const HOSTED: SocketAddr = SocketAddr::new(IpAddr::V6(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1)), 65535);
 
 // We assign a link-local ip for each tcp stream u64 <-> Link local ip
 fn make_ip(id: u64) -> IpAddr {
@@ -133,6 +127,7 @@ impl TurnServer {
 		let mut channel = None;
 		let mut xor_peer = None;
 		let mut data = None;
+		let mut turn_fingerprint = None;
 		let unknown_attrs = msg
 			.into_iter()
 			.parse::<USERNAME, &str>(&mut username)
@@ -144,6 +139,7 @@ impl TurnServer {
 			.parse::<CHANNEL_NUMBER, u16>(&mut channel)
 			.parse::<XOR_PEER_ADDRESS, SocketAddr>(&mut xor_peer)
 			.parse::<DATA, &[u8]>(&mut data)
+			.parse::<FINGERPRINT, ()>(&mut turn_fingerprint)
 			.collect_unknown::<8>();
 
 		debug!(class = ?msg.class(), method = ?msg.method(), length = msg.length(), "STUN");
@@ -278,17 +274,14 @@ impl TurnServer {
 				msg.set_method(Method::Data);
 				let data = &mut msg.buffer[48..][..len];
 
-				// Peek at the data
-				match (peer.ip(), peer.port(), data.first()) {
-					// Drop empty datagrams
-					(_, _, None) => return,
+				// Peek inside the packet
+				match (peer, data.first()) {
+					(_, None) => return,
 
-					// Broadcast STUN
-					(BROADCAST | BROADCAST_FF, 65535, Some(0..3)) => {
-						let mut inner = Stun {buffer: &mut msg.buffer[48..]};
+					(HOSTED, Some(0..3)) => {
+						let mut inner = Stun { buffer: &mut msg.buffer[48..] };
 						if inner.len() != len { return }
 						if inner.class() != Class::Request || inner.method() != Method::Binding { return }
-
 						// Parse ICE attributes
 						let mut username = None;
 						let mut integrity = None;
@@ -322,84 +315,67 @@ impl TurnServer {
 
 						// Split the username into dst_ufrag and src_ufrag
 						let Some((dst_ufrag, src_ufrag)) = username.split_once(':') else { return };
-						debug!(dst_ufrag, src_ufrag, "ICE");
+						debug!(dst_ufrag, src_ufrag, "HOSTED ICE");
 
-						// Handle hosted ICE
-						if dst_ufrag == "ucCm6JK3s22XuCRiTZVFpWajUq0tIpB7lDn1Sv8dRv3" {
-							// Wrong credentials
-							if !integrity.verify(&ICE_KEY) {
+						// Wrong credentials
+						if !integrity.verify(&ICE_KEY) {
+							inner.set_length(0);
+							inner.set_class(Class::Error);
+							inner.append::<ERROR_CODE, _>(&(441, "")).unwrap();
+							inner.append::<FINGERPRINT, _>(&()).unwrap();
+							trace!("ICE Error 441");
+						}
+						// ICE Controlled - error switch role
+						else if ice_controlled.is_some() {
+							/*
+							 * HACK: Firefox doesn't currently support switching roles on a 487 Error.
+							 * We detect Firefox because it appends the fingerprint attribute to TURN send indications (pointlessly).
+							 * Instead of returning an error, we have to send a request with a conflicting role.
+							 * ISSUE: https://bugzilla.mozilla.org/show_bug.cgi?id=1940001
+							 */
+							if turn_fingerprint.is_some() {
+								let username = format!("{src_ufrag}:{dst_ufrag}");
 								inner.set_length(0);
-								inner.set_class(Class::Error);
-								inner.append::<ERROR_CODE, _>(&(441, "")).unwrap();
-								inner.append::<FINGERPRINT, _>(&()).unwrap();
-								trace!("ICE Error 441");
-							}
-							// ICE Controlled - error switch role
-							else if ice_controlled.is_some() {
-								if peer.ip() == BROADCAST_FF {
-									let username = format!("{src_ufrag}:{dst_ufrag}");
-									inner.set_length(0);
-									inner.append::<USERNAME, &str>(&username.as_str()).unwrap();
-									inner.append::<ICE_CONTROLLED, u64>(&u64::MIN).unwrap();
-									// inner.append::<PRIORITY, u32>(&0xdeadbeef).unwrap();
-									inner.append::<MESSAGE_INTEGRITY, _>(&ICE_KEY).unwrap();
-									inner.append::<FINGERPRINT, _>(&()).unwrap();
-									debug!("ICE Firefox role conflict");
-								}
-								else {
-									inner.set_length(0);
-									inner.set_class(Class::Error);
-									inner.append::<ERROR_CODE, _>(&(487, "")).unwrap();
-									inner.append::<MESSAGE_INTEGRITY, _>(&ICE_KEY).unwrap();
-									inner.append::<FINGERPRINT, _>(&()).unwrap();
-									trace!("ICE Error 487");
-								}
-							}
-							// Success
-							else {
-								inner.set_length(0);
-								inner.set_class(Class::Success);
-								inner
-									.append::<XOR_MAPPED_ADDRESS, SocketAddr>(&sender.into())
-									.unwrap();
+								inner.append::<USERNAME, &str>(&username.as_str()).unwrap();
+								inner.append::<ICE_CONTROLLED, u64>(&u64::MIN).unwrap();
+								// inner.append::<PRIORITY, u32>(&0xdeadbeef).unwrap();
 								inner.append::<MESSAGE_INTEGRITY, _>(&ICE_KEY).unwrap();
 								inner.append::<FINGERPRINT, _>(&()).unwrap();
-								trace!("ICE Success");
+								debug!("ICE Firefox role conflict");
 							}
-
-							len = inner.len();
-							msg.append::<XOR_PEER_ADDRESS, SocketAddr>(&peer)
-								.unwrap();
+							else {
+								inner.set_length(0);
+								inner.set_class(Class::Error);
+								inner.append::<ERROR_CODE, _>(&(487, "")).unwrap();
+								inner.append::<MESSAGE_INTEGRITY, _>(&ICE_KEY).unwrap();
+								inner.append::<FINGERPRINT, _>(&()).unwrap();
+								trace!("ICE Error 487");
+							}
 						}
-
-						// Broadcast unknown ICE tests
+						// Success
 						else {
-							receiver = peer;
-							msg.append::<XOR_PEER_ADDRESS, SocketAddr>(&match peer.ip() {
-								BROADCAST_FF => SocketAddr::new(BROADCAST_FF, sender.port()),
-								_ => sender
-							})
+							inner.set_length(0);
+							inner.set_class(Class::Success);
+							inner
+								.append::<XOR_MAPPED_ADDRESS, SocketAddr>(&sender.into())
 								.unwrap();
+							inner.append::<MESSAGE_INTEGRITY, _>(&ICE_KEY).unwrap();
+							inner.append::<FINGERPRINT, _>(&()).unwrap();
+							trace!("ICE Success");
 						}
-					}
 
-					// Hosted DTLS
-					(BROADCAST | BROADCAST_FF, 65535, Some(20..64)) => {
-						trace!(?data, "DTLS");
+						len = inner.len();
+						msg.append::<XOR_PEER_ADDRESS, SocketAddr>(&peer)
+							.unwrap();
+					}
+					(HOSTED, Some(20..64)) => {
+						warn!(?data, "DTLS needs relay");
 						return;
 					}
 
-					// Drop all other would-be broadcasts
-					(BROADCAST, _, _) |
-					(BROADCAST_FF, 65535, _) => return,
-
-					// Unicast / Firefox crap
 					_ => {
 						receiver = peer;
-						msg.append::<XOR_PEER_ADDRESS, SocketAddr>(&match peer.ip() {
-							BROADCAST_FF => SocketAddr::new(BROADCAST_FF, sender.port()),
-							_ => sender
-						})
+						msg.append::<XOR_PEER_ADDRESS, SocketAddr>(&sender)
 							.unwrap();
 					}
 				}
@@ -418,33 +394,12 @@ impl TurnServer {
 
 		let frame = Rc::from(&msg.buffer[..msg.len()]);
 
-		match (receiver.ip(), receiver.port()) {
-			// Broadcast
-			(BROADCAST, _) |
-			(BROADCAST_FF, 65535) => {
-				for turn in self.streams.values() {
-					turn.maybe_send(&frame);
-				}
-			}
-			// Fucked up hack to support firefox
-			(BROADCAST_FF, port) => {
-				for turn in self.streams.values() {
-					if turn.port == port {
-						turn.maybe_send(&frame);
-					}
-				}
-			}
-			// TCP unicast
-			(ip, _) => if let Some(key) = get_key(ip) {
-				if let Some(turn) = self.streams.get(&key) {
-					turn.maybe_send(&frame);
-				}
-			}
-			// UDP unicast
-			else {
-				let _ = self.udp.send_to(&frame, receiver);
-			}
-		}
+		// Send UDP
+		let _ = self.udp.send_to(&frame, receiver);
+		// Send TCP
+		let Some(key) = get_key(receiver.ip()) else { return };
+		let Some(turn) = self.streams.get(&key) else { return };
+		turn.maybe_send(&frame);
 	}
 
 	pub fn run(mut self) -> Result<Never> {
