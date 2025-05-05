@@ -2,7 +2,7 @@ use eyre::{eyre, Result};
 use rand::random_range;
 use stun::{Stun, Class, Method, attr::{*, parse::AttrIter as _, integrity::Integrity}};
 use tracing_subscriber::{layer::SubscriberExt, EnvFilter};
-use std::{collections::BTreeMap, io::{Error, ErrorKind, Read as _, Write as _}, net::{IpAddr, Ipv6Addr}};
+use std::{collections::BTreeMap, io::{Error, ErrorKind, Read as _, Write as _}, net::{IpAddr, Ipv6Addr}, u16};
 use std::net::SocketAddr;
 use std::rc::Rc;
 use mio::event::Source as _;
@@ -23,12 +23,6 @@ fn make_ip(id: u64) -> IpAddr {
 	octets[8..].copy_from_slice(&id.to_ne_bytes());
 	IpAddr::V6(Ipv6Addr::from(octets))
 }
-fn get_key(ip: IpAddr) -> Option<u64> {
-	match ip {
-		IpAddr::V6(ip6) if ip6.is_unicast_link_local() => Some(u64::from_ne_bytes(ip6.octets()[8..].try_into().unwrap())),
-		_ => None
-	}
-}
 
 fn would_block<T>(res: &Result<T, Error>) -> bool {
 	match res {
@@ -39,7 +33,6 @@ fn would_block<T>(res: &Result<T, Error>) -> bool {
 
 // These are the turn
 struct Turn {
-	port: u16,
 	stream: TcpStream,
 	canonical: SocketAddr,
 	partial: Cell<Option<(usize, Rc<[u8]>)>>,
@@ -102,7 +95,7 @@ impl Turn {
 struct TurnServer {
 	udp: UdpSocket,
 	tcp: TcpListener,
-	streams: BTreeMap<u64, Turn>,
+	streams: BTreeMap<SocketAddr, Turn>,
 	// TODO: Add DTLS state somewhere
 }
 const UDP: usize = usize::MAX;
@@ -397,8 +390,7 @@ impl TurnServer {
 		// Send UDP
 		let _ = self.udp.send_to(&frame, receiver);
 		// Send TCP
-		let Some(key) = get_key(receiver.ip()) else { return };
-		let Some(turn) = self.streams.get(&key) else { return };
+		let Some(turn) = self.streams.get(&receiver) else { return };
 		turn.maybe_send(&frame);
 	}
 
@@ -434,36 +426,40 @@ impl TurnServer {
 						stream.set_nodelay(true)?;
 
 						let token = random_range(0..TCP);
-						let key = token as u64;
+						// Coturn's default port range is 49152-65535.  Ours is 49152-65534, because 65535 is broadcast.
+						let port = random_range(49152..65535);
+						let key = SocketAddr::new(make_ip(token as u64), port);
+
 
 						if let Entry::Vacant(slot) = self.streams.entry(key) {
-							// Coturn's default port range is 49152-65535.  Ours is 49152-65534, because 65535 is broadcast.
-							let port = random_range(49152..65535);
-							info!(key, port, ?addr, "Open");
+							info!(?key, ?canonical, "Open");
 							poll.registry().register(&mut stream, Token(token), Interest::READABLE | Interest::WRITABLE)?;
 							slot.insert(Turn {
 								stream,
 								canonical,
-								port,
 								partial: Cell::default()
 							});
 						}
 					}
 					tok => {
-						let key = tok as u64;
-						let Some(turn) = self.streams.get(&key) else { continue };
-						if event.is_writable() { turn.write(); }
-						if event.is_readable() {
-							let sender = SocketAddr::new(make_ip(key), turn.port);
-							loop {
-								match turn.read(&mut buffer) {
-									Ok(Some(msg)) => self.handle_msg(sender, turn.canonical, msg),
-									Ok(None) => break,
-									Err(error) => {
-										let Turn{ mut stream, port, ..} = self.streams.remove(&key).unwrap();
-										poll.registry().deregister(&mut stream)?;
-										info!(key, port, ?error, "Close");
-										break;
+						let ip = make_ip(tok as u64);
+						let end = SocketAddr::new(ip, u16::MAX);
+						let mut iter = self.streams.range(SocketAddr::new(ip, u16::MIN)..end);
+						while let Some((sender, turn)) = iter.next() {
+							let sender = sender.clone();
+							if event.is_writable() { turn.write(); }
+							if event.is_readable() {
+								loop {
+									match turn.read(&mut buffer) {
+										Ok(Some(msg)) => self.handle_msg(sender, turn.canonical, msg),
+										Ok(None) => break,
+										Err(error) => {
+											let Turn { mut stream, canonical, .. } = self.streams.remove(&sender).unwrap();
+											poll.registry().deregister(&mut stream)?;
+											info!(?sender, ?canonical, ?error, "Close");
+											iter = self.streams.range(sender..=end);
+											break;
+										}
 									}
 								}
 							}
