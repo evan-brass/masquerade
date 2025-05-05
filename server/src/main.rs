@@ -36,7 +36,6 @@ struct Turn {
 	stream: TcpStream,
 	canonical: SocketAddr,
 	partial: Cell<Option<(usize, Rc<[u8]>)>>,
-	// TODO: Firefox enforces permissions, so we also might need a map from SocketAddr -> u16 (pseudo port).  I wonder if we use a sorted map again... then firefox would see the remote port changing as they receive, but... IDK
 }
 impl Turn {
 	pub fn read<'i>(&self, buffer: &'i mut [u8]) -> Result<Option<Stun<&'i mut [u8]>>> {
@@ -95,7 +94,7 @@ impl Turn {
 struct TurnServer {
 	udp: UdpSocket,
 	tcp: TcpListener,
-	streams: BTreeMap<SocketAddr, Turn>,
+	streams: BTreeMap<SocketAddr, Rc<Turn>>,
 	// TODO: Add DTLS state somewhere
 }
 const UDP: usize = usize::MAX;
@@ -434,11 +433,11 @@ impl TurnServer {
 						if let Entry::Vacant(slot) = self.streams.entry(key) {
 							info!(?key, ?canonical, "Open");
 							poll.registry().register(&mut stream, Token(token), Interest::READABLE | Interest::WRITABLE)?;
-							slot.insert(Turn {
+							slot.insert(Rc::new(Turn {
 								stream,
 								canonical,
 								partial: Cell::default()
-							});
+							}));
 						}
 					}
 					tok => {
@@ -454,10 +453,11 @@ impl TurnServer {
 										Ok(Some(msg)) => self.handle_msg(sender, turn.canonical, msg),
 										Ok(None) => break,
 										Err(error) => {
-											let Turn { mut stream, canonical, .. } = self.streams.remove(&sender).unwrap();
+											let temp = Rc::try_unwrap(self.streams.remove(&sender).unwrap());
+											iter = self.streams.range(sender..=end);
+											let Ok(Turn { mut stream, canonical, ..}) = temp else { break };
 											poll.registry().deregister(&mut stream)?;
 											info!(?sender, ?canonical, ?error, "Close");
-											iter = self.streams.range(sender..=end);
 											break;
 										}
 									}
