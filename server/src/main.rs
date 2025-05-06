@@ -5,7 +5,6 @@ use tracing_subscriber::{layer::SubscriberExt, EnvFilter};
 use std::{collections::BTreeMap, io::{Error, ErrorKind, Read as _, Write as _}, net::{IpAddr, Ipv6Addr}, u16};
 use std::net::SocketAddr;
 use std::rc::Rc;
-use mio::event::Source as _;
 use mio::net::{TcpListener, TcpStream, UdpSocket};
 use mio::{Events, Poll, Interest, Token};
 use std::collections::btree_map::Entry;
@@ -398,8 +397,8 @@ impl TurnServer {
 		let mut poll = Poll::new()?;
 
 		let mut events = Events::with_capacity(128);
-		self.udp.register(poll.registry(), Token(UDP), Interest::READABLE)?;
-		self.tcp.register(poll.registry(), Token(TCP), Interest::READABLE)?;
+		poll.registry().register(&mut self.udp, Token(UDP), Interest::READABLE)?;
+		poll.registry().register(&mut self.tcp, Token(TCP), Interest::READABLE)?;
 
 		loop {
 			for event in events.iter() {
