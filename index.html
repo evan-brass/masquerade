@@ -2,10 +2,12 @@
 <script>
 const is_firefox = typeof RTCPeerConnection.prototype.getIdentityAssertion == 'function';
 const config = {
+	iceTransportPolicy: 'relay',
 	iceServers: [{
 		urls: [
 			// 'turn:stun.evan-brass.net?transport=tcp',
 			'turn:localhost?transport=tcp',
+			'turn:localhost',
 		],
 		username: 'guest',
 		credential: 'password'
@@ -59,7 +61,7 @@ console.log(h.localDescription.type, h.localDescription.sdp);
 </script>
 
 <!-- Relay only a<->b -->
-<script type="_module">
+<script type="module">
 const a = new RTCPeerConnection(config);
 const b = new RTCPeerConnection(config);
 a.createDataChannel('');
