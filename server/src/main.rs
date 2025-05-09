@@ -8,6 +8,7 @@ use tracing_subscriber::{EnvFilter, prelude::*};
 
 type Never = core::convert::Infallible;
 const ACCEPT: usize = usize::MAX;
+const ICE_KEY: &[u8] = b"the/ice/password/constant";
 
 // We assign a link-local ip for each tcp stream u64 <-> Link local ip
 fn make_ip(token: usize) -> IpAddr {
@@ -150,6 +151,7 @@ fn main() -> eyre::Result<Never> {
 						let mut channel = None;
 						let mut xor_peer = None;
 						let mut data = None;
+						let mut turn_fingerprint = None;
 						let unknown_attrs = msg
 							.into_iter()
 							.parse::<USERNAME, &str>(&mut username)
@@ -161,8 +163,10 @@ fn main() -> eyre::Result<Never> {
 							.parse::<CHANNEL_NUMBER, u16>(&mut channel)
 							.parse::<XOR_PEER_ADDRESS, SocketAddr>(&mut xor_peer)
 							.parse::<DATA, &[u8]>(&mut data)
+							.parse::<FINGERPRINT, ()>(&mut turn_fingerprint)
 							.collect_unknown::<8>();
-						trace!(?allocated, ?canonical, ?msg, "STUN");
+
+						// trace!(class = msg.class(), method = msg.method(), length = msg.length(), "STUN");
 
 						let method_unknown = !matches!(msg.method(), Method::Binding | Method::Allocate | Method::Refresh | Method::CreatePermission | Method::Send | Method::ChannelBind);
 
@@ -275,42 +279,135 @@ fn main() -> eyre::Result<Never> {
 
 								// Shift the data attribute to where we want it
 								// [ STUN Header | XOR Peer Attr | Data... ]
-								let len = data.len();
+								let mut len = data.len();
 								let i = data.as_ptr() as usize - 4 - msg.buffer.as_ptr() as usize;
+								if 48 + data.len() > msg.buffer.len() { continue }
 								msg.buffer.copy_within(i..i + 4 + len, 44);
+								let data = &mut msg.buffer[48..][..len];
+
+								let mut intercepted = false;
+								'intercept: {
+									if !matches!(data.first(), Some(0..3)) { break 'intercept }
+									let mut inner = Stun { buffer: &mut msg.buffer[48..] };
+									if inner.len() != len { break 'intercept }
+									if inner.class() != Class::Request || inner.method() != Method::Binding { break 'intercept }
+
+									// Parse ICE attributes
+									let mut username = None;
+									let mut integrity = None;
+									let mut ice_controlled = None;
+									let mut ice_controlling = None;
+									let mut priority = None;
+									let mut use_candidate = None;
+									let mut fingerprint = None;
+									let unknowns = inner
+										.into_iter()
+										.parse::<USERNAME, &str>(&mut username)
+										.parse::<MESSAGE_INTEGRITY, Integrity<20>>(&mut integrity)
+										.parse::<ICE_CONTROLLED, u64>(&mut ice_controlled)
+										.parse::<ICE_CONTROLLING, u64>(&mut ice_controlling)
+										.parse::<PRIORITY, u32>(&mut priority)
+										.parse::<USE_CANDIDATE, ()>(&mut use_candidate)
+										.parse::<FINGERPRINT, ()>(&mut fingerprint)
+										.collect_unknown::<1>();
+
+									if unknowns.is_some() { break 'intercept }
+
+									// Make sure all expected attributes are present and no unexpected attributes exist
+									let (None, Some(username), Some(integrity), Some(_), Some(_), Some(())) = (
+										unknowns,
+										username,
+										integrity,
+										ice_controlled.xor(ice_controlling),
+										priority,
+										fingerprint,
+									) else { break 'intercept };
+
+									// Split the username into dst_ufrag and src_ufrag
+									let Some((dst_ufrag, src_ufrag)) = username.split_once(':') else { break 'intercept };
+
+									if dst_ufrag != "dissolve" { break 'intercept }
+
+									// Wrong credentials
+									if !integrity.verify(&ICE_KEY) {
+										inner.set_length(0);
+										inner.set_class(Class::Error);
+										inner.append::<ERROR_CODE, _>(&(441, "")).unwrap();
+										inner.append::<FINGERPRINT, _>(&()).unwrap();
+									}
+									// ICE Controlled - error switch role
+									else if ice_controlled.is_some() {
+										/*
+										 * HACK: Firefox doesn't support 487
+										 * ISSUE: https://bugzilla.mozilla.org/show_bug.cgi?id=1940001
+										 */
+										if turn_fingerprint.is_some() {
+											let username = format!("{src_ufrag}:{dst_ufrag}");
+											inner.set_length(0);
+											inner.append::<USERNAME, &str>(&username.as_str()).unwrap();
+											inner.append::<ICE_CONTROLLED, u64>(&u64::MIN).unwrap();
+											// inner.append::<PRIORITY, u32>(&0xdeadbeef).unwrap();
+											inner.append::<MESSAGE_INTEGRITY, _>(&ICE_KEY).unwrap();
+											inner.append::<FINGERPRINT, _>(&()).unwrap();
+										}
+										else {
+											inner.set_length(0);
+											inner.set_class(Class::Error);
+											inner.append::<ERROR_CODE, _>(&(487, "")).unwrap();
+											inner.append::<MESSAGE_INTEGRITY, _>(&ICE_KEY).unwrap();
+											inner.append::<FINGERPRINT, _>(&()).unwrap();
+										}
+									}
+									// Success
+									else {
+										inner.set_length(0);
+										inner.set_class(Class::Success);
+										inner
+											.append::<XOR_MAPPED_ADDRESS, SocketAddr>(&allocated)
+											.unwrap();
+										inner.append::<MESSAGE_INTEGRITY, _>(&ICE_KEY).unwrap();
+										inner.append::<FINGERPRINT, _>(&()).unwrap();
+									}
+
+									len = inner.len();
+									intercepted = true;
+								}
+
+								// Reuse the message:
 								msg.set_length(0);
 								msg.set_method(Method::Data);
-								let _data = &mut msg.buffer[48..][..len];
 
-								// TODO: Hosted
+								// Place peer address
+								msg.append::<XOR_PEER_ADDRESS, SocketAddr>(if intercepted {
+									&peer
+								} else {
+									&allocated
+								}).unwrap();
 
 								// Zero out the padding bytes:
 								let padding = (4 - len % 4) % 4;
 								msg.buffer[48 + len..][..padding].fill(0);
-
-								// Place peer address
-								msg.append::<XOR_PEER_ADDRESS, SocketAddr>(&allocated).unwrap();
 
 								// Write the length of the Data attribute and update the length of the STUN packet
 								msg.buffer[46..48].copy_from_slice(&u16::to_be_bytes(len as u16));
 								msg.set_length(28 + (len + padding) as u16);
 
 								// Relay the Data Indication
-								let frame = &msg.buffer[..msg.len()];
-								let key = get_key(peer.ip()).unwrap_or(udp_key);
-								if let Some(turn) = streams.get_mut(key) {
-									trace!(?turn, ?frame, "RELAY");
-									let _ = turn.maybe_send(peer, frame);
-								}
+								if !intercepted {
+									let frame = &msg.buffer[..msg.len()];
+									let key = get_key(peer.ip()).unwrap_or(udp_key);
+									if let Some(turn) = streams.get_mut(key) {
+										// TODO: Handle errors?  Or wait for them to propagate to read?
+										let _ = turn.maybe_send(peer, frame);
+									}
 
-								// Data already sent, don't respond.
-								continue;
+									// Data already sent, don't respond.
+									continue;
+								}
 							}
 
 							_ => continue,
 						}
-
-						trace!(?msg, ?allocated, "STUN OUT");
 
 						// TODO: Handle errors?  Or wait for them to propagate to read?
 						let _ = turn.maybe_send(allocated, &msg.buffer[..msg.len()]);

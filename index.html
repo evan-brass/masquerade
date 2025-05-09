@@ -7,7 +7,7 @@ const config = {
 		urls: [
 			// 'turn:stun.evan-brass.net?transport=tcp',
 			'turn:localhost?transport=tcp',
-			'turn:localhost',
+			// 'turn:localhost',
 		],
 		username: 'guest',
 		credential: 'password'
@@ -15,6 +15,7 @@ const config = {
 };
 const hosted = {
 	sdpMLineIndex: 0,
+	// TODO: Hosted doesn't exist at the moment...
 	candidate: `candidate:f 1 udp 42 fe80::1 65535 typ relay raddr :: rport 0`
 };
 </script>
@@ -58,6 +59,33 @@ if (is_firefox) {
 await h.setLocalDescription(answer);
 await h.addIceCandidate(hosted);
 console.log(h.localDescription.type, h.localDescription.sdp);
+</script>
+
+<!-- Dissolved a<->b -->
+ <script type="_module">
+const a = new RTCPeerConnection(config);
+const b = new RTCPeerConnection(config);
+a.createDataChannel('');
+
+log_everything(a, 'a');
+log_everything(b, 'b');
+
+// TODO: Firefox would also need to mung the local password because no 487
+function dissolve({ type, sdp }) {
+	return {
+		type,
+		sdp: sdp
+			.replace(/a=ice-ufrag:.+/img, 'a=ice-ufrag:dissolve')
+			.replace(/a=ice-pwd:.+/img, 'a=ice-pwd:the/ice/password/constant')
+	};
+}
+
+await a.setLocalDescription();
+while (a.iceGatheringState != 'complete') await new Promise(res => a.addEventListener('icegatheringstatechange', res, {once: true}));
+await b.setRemoteDescription(dissolve(a.localDescription));
+await b.setLocalDescription();
+while (b.iceGatheringState != 'complete') await new Promise(res => b.addEventListener('icegatheringstatechange', res, {once: true}));
+await a.setRemoteDescription(dissolve(b.localDescription));
 </script>
 
 <!-- Relay only a<->b -->
