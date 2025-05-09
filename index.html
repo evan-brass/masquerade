@@ -5,9 +5,10 @@ const config = {
 	iceTransportPolicy: 'relay',
 	iceServers: [{
 		urls: [
-			// 'turn:stun.evan-brass.net?transport=tcp',
-			'turn:localhost?transport=tcp',
+			'turn:stun.evan-brass.net',
+			'turn:stun.evan-brass.net?transport=tcp',
 			// 'turn:localhost',
+			// 'turn:localhost?transport=tcp',
 		],
 		username: 'guest',
 		credential: 'password'
