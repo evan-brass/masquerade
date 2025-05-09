@@ -311,8 +311,6 @@ fn main() -> eyre::Result<Never> {
 										.parse::<FINGERPRINT, ()>(&mut fingerprint)
 										.collect_unknown::<1>();
 
-									if unknowns.is_some() { break 'intercept }
-
 									// Make sure all expected attributes are present and no unexpected attributes exist
 									let (None, Some(username), Some(integrity), Some(_), Some(_), Some(())) = (
 										unknowns,
