@@ -5,7 +5,6 @@ pub enum SocketAddrError {
 }
 macro_rules! sockaddr_attr {
 	($typ:ident, $xor:literal) => {
-		#[doc = ""]
 		impl crate::attr::Attr<'_, { crate::attr::$typ }> for core::net::SocketAddr {
 			type Error = crate::attr::values::SocketAddrError;
 			fn decode(prefix: crate::attr::Prefix, value: &[u8]) -> Result<Self, Self::Error> {

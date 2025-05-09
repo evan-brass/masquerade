@@ -51,7 +51,7 @@ impl AttrEnc<CHANNEL_NUMBER> for u16 {
 impl Attr<'_, EVEN_PORT> for bool {
 	type Error = crate::rfc8489::UnexpectedLength;
 	fn decode(_: crate::attr::Prefix, value: &[u8]) -> Result<Self, Self::Error> {
-		if value.len() < 1 {
+		if value.is_empty() {
 			return Err(crate::rfc8489::UnexpectedLength);
 		}
 		Ok(value[0] & 0b10000000 != 0)

@@ -1,10 +1,17 @@
-use std::{io::{self, BufWriter, ErrorKind, Read, Write}, net::{IpAddr, Ipv6Addr, Shutdown, SocketAddr}};
+use std::{
+	io::{self, BufWriter, ErrorKind, Read, Write},
+	net::{IpAddr, Ipv6Addr, Shutdown, SocketAddr},
+};
 
-use stun::{Stun, Class, Method, attr::*, attr::parse::AttrIter as _, attr::integrity::Integrity};
-use mio::{net::{TcpListener, TcpStream, UdpSocket}, Events, event::Event, Interest, Poll, Token};
+use mio::{
+	event::Event,
+	net::{TcpListener, TcpStream, UdpSocket},
+	Events, Interest, Poll, Token,
+};
 use slab::Slab;
+use stun::{attr::integrity::Integrity, attr::parse::AttrIter as _, attr::*, Class, Method, Stun};
 use tracing::trace;
-use tracing_subscriber::{EnvFilter, prelude::*};
+use tracing_subscriber::{prelude::*, EnvFilter};
 
 type Never = core::convert::Infallible;
 const ACCEPT: usize = usize::MAX;
@@ -18,27 +25,35 @@ fn make_ip(token: usize) -> IpAddr {
 }
 fn get_key(ip: IpAddr) -> Option<usize> {
 	match ip {
-		IpAddr::V6(ip6) if ip6.is_unicast_link_local() => Some(u64::from_be_bytes(ip6.octets()[8..].try_into().unwrap()) as usize),
-		_ => None
+		IpAddr::V6(ip6) if ip6.is_unicast_link_local() => {
+			Some(u64::from_be_bytes(ip6.octets()[8..].try_into().unwrap()) as usize)
+		}
+		_ => None,
 	}
 }
 
 #[derive(Debug)]
 enum Turn {
 	Udp {
-		socket: UdpSocket
+		socket: UdpSocket,
 	},
 	Tcp {
 		stream: BufWriter<TcpStream>,
 		canonical: SocketAddr,
-	}
+	},
 }
 impl Turn {
-	pub fn handle<'i>(&mut self, e: &Event, buffer: &'i mut [u8]) -> io::Result<Option<(SocketAddr, SocketAddr, Stun<&'i mut [u8]>)>> {
+	pub fn handle<'i>(
+		&mut self,
+		e: &Event,
+		buffer: &'i mut [u8],
+	) -> io::Result<Option<(SocketAddr, SocketAddr, Stun<&'i mut [u8]>)>> {
 		match self {
 			Self::Udp { socket } => {
 				// Udp, Should only return would-block errors anyway.
-				let (len, allocated) = socket.recv_from(buffer).map_err(|e| io::Error::new(ErrorKind::WouldBlock, e))?;
+				let (len, allocated) = socket
+					.recv_from(buffer)
+					.map_err(|e| io::Error::new(ErrorKind::WouldBlock, e))?;
 				let canonical = SocketAddr::new(allocated.ip().to_canonical(), allocated.port());
 				let msg = Stun { buffer };
 				if len < msg.len() {
@@ -63,14 +78,14 @@ impl Turn {
 					}
 					let msg = Stun { buffer };
 					if msg.len() > msg.buffer.len() {
-						return Err(io::Error::other("STUN message too large to fit in buffer"))
+						return Err(io::Error::other("STUN message too large to fit in buffer"));
 					}
 					if len < msg.len() {
 						return would_block;
 					}
 					let exp_len = msg.len();
 					stream.get_ref().read_exact(&mut msg.buffer[..exp_len])?;
-					return Ok(Some((allocated, *canonical, msg)))
+					return Ok(Some((allocated, *canonical, msg)));
 				}
 				would_block
 			}
@@ -97,8 +112,8 @@ fn main() -> eyre::Result<Never> {
 	// Enable logging
 	tracing::subscriber::set_global_default(
 		tracing_subscriber::registry()
-		.with(tracing_subscriber::fmt::layer())
-		.with(EnvFilter::from_default_env())
+			.with(tracing_subscriber::fmt::layer())
+			.with(EnvFilter::from_default_env()),
 	)?;
 
 	let mut streams = Slab::new();
@@ -107,12 +122,15 @@ fn main() -> eyre::Result<Never> {
 	let mut poll = Poll::new()?;
 	let addr = "[::]:3478".parse()?;
 	let mut listener = TcpListener::bind(addr)?;
-	poll.registry().register(&mut listener, Token(ACCEPT), Interest::READABLE)?;
-	let udp_key; {
+	poll.registry()
+		.register(&mut listener, Token(ACCEPT), Interest::READABLE)?;
+	let udp_key;
+	{
 		let mut socket = UdpSocket::bind(addr)?;
 		let entry = streams.vacant_entry();
 		udp_key = entry.key();
-		poll.registry().register(&mut socket, Token(udp_key), Interest::READABLE)?;
+		poll.registry()
+			.register(&mut socket, Token(udp_key), Interest::READABLE)?;
 		entry.insert(Turn::Udp { socket });
 	}
 
@@ -126,19 +144,30 @@ fn main() -> eyre::Result<Never> {
 
 			if key == ACCEPT {
 				loop {
-					let Ok((mut stream, addr)) = listener.accept() else { break };
+					let Ok((mut stream, addr)) = listener.accept() else {
+						break;
+					};
 					let entry = streams.vacant_entry();
 					stream.set_nodelay(true)?;
-					poll.registry().register(&mut stream, Token(entry.key()), Interest::READABLE | Interest::WRITABLE)?;
+					poll.registry().register(
+						&mut stream,
+						Token(entry.key()),
+						Interest::READABLE | Interest::WRITABLE,
+					)?;
 					let canonical = SocketAddr::new(addr.ip().to_canonical(), addr.port());
 					trace!(?canonical, "ACCEPT");
-					entry.insert(Turn::Tcp { stream: BufWriter::with_capacity(BUFFER_LEN, stream), canonical });
+					entry.insert(Turn::Tcp {
+						stream: BufWriter::with_capacity(BUFFER_LEN, stream),
+						canonical,
+					});
 				}
 				continue;
 			}
 
 			loop {
-				let Some(turn) = streams.get_mut(e.token().0) else { break };
+				let Some(turn) = streams.get_mut(e.token().0) else {
+					break;
+				};
 				match turn.handle(e, &mut buffer) {
 					Ok(Some((allocated, canonical, mut msg))) => {
 						// Parse TURN attributes
@@ -168,10 +197,18 @@ fn main() -> eyre::Result<Never> {
 
 						// trace!(class = msg.class(), method = msg.method(), length = msg.length(), "STUN");
 
-						let method_unknown = !matches!(msg.method(), Method::Binding | Method::Allocate | Method::Refresh | Method::CreatePermission | Method::Send | Method::ChannelBind);
+						let method_unknown = !matches!(
+							msg.method(),
+							Method::Binding
+								| Method::Allocate | Method::Refresh
+								| Method::CreatePermission
+								| Method::Send | Method::ChannelBind
+						);
 
 						// Compute a long-term key for authentication
-						let turn_key = if let (Some(username), Some(realm), Some(_)) = (username, realm, &integrity) {
+						let turn_key = if let (Some(username), Some(realm), Some(_)) =
+							(username, realm, &integrity)
+						{
 							let mut ctx = md5::Context::new();
 							ctx.consume(username);
 							ctx.consume(":");
@@ -190,7 +227,8 @@ fn main() -> eyre::Result<Never> {
 							(Class::Request, Method::Binding) => {
 								msg.set_length(0);
 								msg.set_class(Class::Success);
-								msg.append::<XOR_MAPPED_ADDRESS, SocketAddr>(&canonical).unwrap();
+								msg.append::<XOR_MAPPED_ADDRESS, SocketAddr>(&canonical)
+									.unwrap();
 							}
 
 							// Unknown Method
@@ -205,7 +243,8 @@ fn main() -> eyre::Result<Never> {
 								msg.set_length(0);
 								msg.set_class(Class::Error);
 								msg.append::<ERROR_CODE, _>(&(420, "")).unwrap();
-								msg.append::<UNKNOWN_ATTRIBUTES, _>(&unknown_attrs.unwrap()).unwrap();
+								msg.append::<UNKNOWN_ATTRIBUTES, _>(&unknown_attrs.unwrap())
+									.unwrap();
 							}
 							_ if unknown_attrs.is_some() => continue,
 
@@ -227,11 +266,14 @@ fn main() -> eyre::Result<Never> {
 							}
 
 							// Non-UDP Allocate
-							(Class::Request, Method::Allocate) if requested_transport != Some(17) => {
+							(Class::Request, Method::Allocate)
+								if requested_transport != Some(17) =>
+							{
 								msg.set_length(0);
 								msg.set_class(Class::Error);
 								msg.append::<ERROR_CODE, _>(&(442, "")).unwrap();
-								msg.append::<MESSAGE_INTEGRITY, _>(&turn_key.as_slice()).unwrap();
+								msg.append::<MESSAGE_INTEGRITY, _>(&turn_key.as_slice())
+									.unwrap();
 							}
 
 							// Allocate
@@ -239,9 +281,12 @@ fn main() -> eyre::Result<Never> {
 								msg.set_length(0);
 								msg.set_class(Class::Success);
 								msg.append::<XOR_MAPPED_ADDRESS, _>(&canonical).unwrap();
-								msg.append::<XOR_RELAYED_ADDRESS, SocketAddr>(&allocated).unwrap();
-								msg.append::<LIFETIME, _>(&lifetime.unwrap_or(1000)).unwrap();
-								msg.append::<MESSAGE_INTEGRITY, _>(&turn_key.as_slice()).unwrap();
+								msg.append::<XOR_RELAYED_ADDRESS, SocketAddr>(&allocated)
+									.unwrap();
+								msg.append::<LIFETIME, _>(&lifetime.unwrap_or(1000))
+									.unwrap();
+								msg.append::<MESSAGE_INTEGRITY, _>(&turn_key.as_slice())
+									.unwrap();
 							}
 
 							// Refresh
@@ -249,15 +294,18 @@ fn main() -> eyre::Result<Never> {
 							(Class::Request, Method::Refresh) => {
 								msg.set_length(0);
 								msg.set_class(Class::Success);
-								msg.append::<LIFETIME, _>(&lifetime.unwrap_or(1000)).unwrap();
-								msg.append::<MESSAGE_INTEGRITY, _>(&turn_key.as_slice()).unwrap();
+								msg.append::<LIFETIME, _>(&lifetime.unwrap_or(1000))
+									.unwrap();
+								msg.append::<MESSAGE_INTEGRITY, _>(&turn_key.as_slice())
+									.unwrap();
 							}
 
 							// Create Permission
 							(Class::Request, Method::CreatePermission) => {
 								msg.set_length(0);
 								msg.set_class(Class::Success);
-								msg.append::<MESSAGE_INTEGRITY, _>(&turn_key.as_slice()).unwrap();
+								msg.append::<MESSAGE_INTEGRITY, _>(&turn_key.as_slice())
+									.unwrap();
 							}
 
 							// Channel Bind
@@ -265,32 +313,50 @@ fn main() -> eyre::Result<Never> {
 								msg.set_length(0);
 								msg.set_class(Class::Error);
 								msg.append::<ERROR_CODE, _>(&(438, "")).unwrap();
-								msg.append::<MESSAGE_INTEGRITY, _>(&turn_key.as_slice()).unwrap();
+								msg.append::<MESSAGE_INTEGRITY, _>(&turn_key.as_slice())
+									.unwrap();
 							}
 
 							// Send
 							(Class::Indication, Method::Send) => {
-								let (Some(peer), Some(data)) = (xor_peer, data) else { continue };
+								let (Some(peer), Some(data)) = (xor_peer, data) else {
+									continue;
+								};
 								// Our sockets are dual stack so we want ip6-mapped:
-								let peer = SocketAddr::new(match peer.ip() {
-									IpAddr::V4(v4) => v4.to_ipv6_mapped().into(),
-									v => v
-								}, peer.port());
+								let peer = SocketAddr::new(
+									match peer.ip() {
+										IpAddr::V4(v4) => v4.to_ipv6_mapped().into(),
+										v => v,
+									},
+									peer.port(),
+								);
 
 								// Shift the data attribute to where we want it
 								// [ STUN Header | XOR Peer Attr | Data... ]
 								let mut len = data.len();
 								let i = data.as_ptr() as usize - 4 - msg.buffer.as_ptr() as usize;
-								if 48 + data.len() > msg.buffer.len() { continue }
+								if 48 + data.len() > msg.buffer.len() {
+									continue;
+								}
 								msg.buffer.copy_within(i..i + 4 + len, 44);
 								let data = &mut msg.buffer[48..][..len];
 
 								let mut intercepted = false;
 								'intercept: {
-									if !matches!(data.first(), Some(0..3)) { break 'intercept }
-									let mut inner = Stun { buffer: &mut msg.buffer[48..] };
-									if inner.len() != len { break 'intercept }
-									if inner.class() != Class::Request || inner.method() != Method::Binding { break 'intercept }
+									if !matches!(data.first(), Some(0..3)) {
+										break 'intercept;
+									}
+									let mut inner = Stun {
+										buffer: &mut msg.buffer[48..],
+									};
+									if inner.len() != len {
+										break 'intercept;
+									}
+									if inner.class() != Class::Request
+										|| inner.method() != Method::Binding
+									{
+										break 'intercept;
+									}
 
 									// Parse ICE attributes
 									let mut username = None;
@@ -312,22 +378,37 @@ fn main() -> eyre::Result<Never> {
 										.collect_unknown::<1>();
 
 									// Make sure all expected attributes are present and no unexpected attributes exist
-									let (None, Some(username), Some(integrity), Some(_), Some(_), Some(())) = (
+									let (
+										None,
+										Some(username),
+										Some(integrity),
+										Some(_),
+										Some(_),
+										Some(()),
+									) = (
 										unknowns,
 										username,
 										integrity,
 										ice_controlled.xor(ice_controlling),
 										priority,
 										fingerprint,
-									) else { break 'intercept };
+									)
+									else {
+										break 'intercept;
+									};
 
 									// Split the username into dst_ufrag and src_ufrag
-									let Some((dst_ufrag, src_ufrag)) = username.split_once(':') else { break 'intercept };
+									let Some((dst_ufrag, src_ufrag)) = username.split_once(':')
+									else {
+										break 'intercept;
+									};
 
-									if dst_ufrag != "dissolve" { break 'intercept }
+									if dst_ufrag != "dissolve" {
+										break 'intercept;
+									}
 
 									// Wrong credentials
-									if !integrity.verify(&ICE_KEY) {
+									if !integrity.verify(ICE_KEY) {
 										inner.set_length(0);
 										inner.set_class(Class::Error);
 										inner.append::<ERROR_CODE, _>(&(441, "")).unwrap();
@@ -342,13 +423,14 @@ fn main() -> eyre::Result<Never> {
 										if turn_fingerprint.is_some() {
 											let username = format!("{src_ufrag}:{dst_ufrag}");
 											inner.set_length(0);
-											inner.append::<USERNAME, &str>(&username.as_str()).unwrap();
+											inner
+												.append::<USERNAME, &str>(&username.as_str())
+												.unwrap();
 											inner.append::<ICE_CONTROLLED, u64>(&u64::MIN).unwrap();
 											// inner.append::<PRIORITY, u32>(&0xdeadbeef).unwrap();
 											inner.append::<MESSAGE_INTEGRITY, _>(&ICE_KEY).unwrap();
 											inner.append::<FINGERPRINT, _>(&()).unwrap();
-										}
-										else {
+										} else {
 											inner.set_length(0);
 											inner.set_class(Class::Error);
 											inner.append::<ERROR_CODE, _>(&(487, "")).unwrap();
@@ -380,7 +462,8 @@ fn main() -> eyre::Result<Never> {
 									&peer
 								} else {
 									&allocated
-								}).unwrap();
+								})
+								.unwrap();
 
 								// Zero out the padding bytes:
 								let padding = (4 - len % 4) % 4;
@@ -412,7 +495,11 @@ fn main() -> eyre::Result<Never> {
 					}
 					Err(e) if e.kind() == ErrorKind::WouldBlock => break,
 					Err(e) => {
-						let Turn::Tcp { mut stream, canonical } = streams.remove(key) else {
+						let Turn::Tcp {
+							mut stream,
+							canonical,
+						} = streams.remove(key)
+						else {
 							panic!("Turn::Udp mustn't return errors")
 						};
 						trace!(?e, ?canonical, "CLOSE");
