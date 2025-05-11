@@ -1,6 +1,6 @@
 use std::{
-	io::{self, BufWriter, ErrorKind, Read, Write},
-	net::{IpAddr, Ipv6Addr, Shutdown, SocketAddr},
+	collections::BTreeMap, io::{self, BufWriter, ErrorKind, Read, Write}, net::{IpAddr, Ipv6Addr, Shutdown, SocketAddr},
+	rc::Rc,
 };
 
 use mio::{
@@ -16,6 +16,7 @@ use tracing_subscriber::{prelude::*, EnvFilter};
 type Never = core::convert::Infallible;
 const ACCEPT: usize = usize::MAX;
 const ICE_KEY: &[u8] = b"the/ice/password/constant";
+const LAST_SEEN: SocketAddr = SocketAddr::new(IpAddr::V6(Ipv6Addr::new(0xfe80, 0, 0, 0, 0xffff, 0xffff, 0xffff, 0xffff)), 65535);
 
 // We assign a link-local ip for each tcp stream u64 <-> Link local ip
 fn make_ip(token: usize) -> IpAddr {
@@ -40,6 +41,7 @@ enum Turn {
 	Tcp {
 		stream: BufWriter<TcpStream>,
 		canonical: SocketAddr,
+		username: Option<Rc<str>>,
 	},
 }
 impl Turn {
@@ -61,7 +63,7 @@ impl Turn {
 				}
 				Ok(Some((allocated, canonical, msg)))
 			}
-			Self::Tcp { stream, canonical } => {
+			Self::Tcp { stream, canonical, .. } => {
 				let would_block = Err(io::Error::new(ErrorKind::WouldBlock, ""));
 				let allocated = SocketAddr::new(make_ip(e.token().0), canonical.port());
 				if e.is_writable() {
@@ -118,6 +120,7 @@ fn main() -> eyre::Result<Never> {
 
 	let mut streams = Slab::new();
 	let mut events = Events::with_capacity(128);
+	let mut usernames = BTreeMap::new();
 
 	let mut poll = Poll::new()?;
 	let addr = "[::]:3478".parse()?;
@@ -159,6 +162,7 @@ fn main() -> eyre::Result<Never> {
 					entry.insert(Turn::Tcp {
 						stream: BufWriter::with_capacity(BUFFER_LEN, stream),
 						canonical,
+						username: None
 					});
 				}
 				continue;
@@ -194,8 +198,6 @@ fn main() -> eyre::Result<Never> {
 							.parse::<DATA, &[u8]>(&mut data)
 							.parse::<FINGERPRINT, ()>(&mut turn_fingerprint)
 							.collect_unknown::<8>();
-
-						// trace!(class = msg.class(), method = msg.method(), length = msg.length(), "STUN");
 
 						let method_unknown = !matches!(
 							msg.method(),
@@ -278,6 +280,16 @@ fn main() -> eyre::Result<Never> {
 
 							// Allocate
 							(Class::Request, Method::Allocate) => {
+								// Register the TURN username (if TCP)
+								let turn_username = username.unwrap();
+								if let Turn::Tcp { username, .. } = turn {
+									if username.is_none() {
+										let temp: Rc<str> = Rc::from(turn_username);
+										*username = Some(temp.clone());
+										usernames.insert(temp, key);
+									}
+								}
+
 								msg.set_length(0);
 								msg.set_class(Class::Success);
 								msg.append::<XOR_MAPPED_ADDRESS, _>(&canonical).unwrap();
@@ -458,7 +470,7 @@ fn main() -> eyre::Result<Never> {
 								msg.set_method(Method::Data);
 
 								// Place peer address
-								msg.append::<XOR_PEER_ADDRESS, SocketAddr>(if intercepted {
+								msg.append::<XOR_PEER_ADDRESS, SocketAddr>(if peer == LAST_SEEN || intercepted {
 									&peer
 								} else {
 									&allocated
@@ -475,8 +487,17 @@ fn main() -> eyre::Result<Never> {
 
 								// Relay the Data Indication
 								if !intercepted {
+									let key = if peer == LAST_SEEN {
+										let Turn::Tcp { username: Some(username), .. } = turn else { continue };
+										let Some((a, b)) = username.split_once(':') else { continue };
+										let swapped = format!("{b}:{a}");
+										let Some(key) = usernames.get(swapped.as_str()) else { continue };
+										*key
+									} else {
+										get_key(peer.ip()).unwrap_or(udp_key)
+									};
+
 									let frame = &msg.buffer[..msg.len()];
-									let key = get_key(peer.ip()).unwrap_or(udp_key);
 									if let Some(turn) = streams.get_mut(key) {
 										// TODO: Handle errors?  Or wait for them to propagate to read?
 										let _ = turn.maybe_send(peer, frame);
@@ -498,12 +519,22 @@ fn main() -> eyre::Result<Never> {
 						let Turn::Tcp {
 							mut stream,
 							canonical,
+							username,
+							..
 						} = streams.remove(key)
 						else {
 							panic!("Turn::Udp mustn't return errors")
 						};
 						trace!(?e, ?canonical, "CLOSE");
 						poll.registry().deregister(stream.get_mut())?;
+
+						// Remove from usernames if it was already in the usernames.
+						if let Some(std::collections::btree_map::Entry::Occupied(entry)) = username.map(|u| usernames.entry(u)) {
+							if *entry.get() == key {
+								entry.remove();
+							}
+						}
+
 						break;
 					}
 					_ => {}
