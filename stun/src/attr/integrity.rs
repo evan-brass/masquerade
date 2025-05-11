@@ -50,7 +50,7 @@ mod mbedtls_integrity {
 			20
 		}
 		fn encode(&self, prefix: Prefix, value: &mut [u8]) {
-			let mut hasher: Hmac<Sha1> = Hmac::new_from_slice(*self).unwrap();
+			let mut hasher: Hmac<Sha1> = Hmac::new_from_slice(self).unwrap();
 			prefix.reduce_over_prefix(|s| hasher.update(s));
 			hasher.finalize_into(value.into());
 		}

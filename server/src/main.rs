@@ -1,5 +1,7 @@
 use std::{
-	collections::BTreeMap, io::{self, BufWriter, ErrorKind, Read, Write}, net::{IpAddr, Ipv6Addr, Shutdown, SocketAddr},
+	collections::BTreeMap,
+	io::{self, BufWriter, ErrorKind, Read, Write},
+	net::{IpAddr, Ipv6Addr, Shutdown, SocketAddr},
 	rc::Rc,
 };
 
@@ -16,7 +18,12 @@ use tracing_subscriber::{prelude::*, EnvFilter};
 type Never = core::convert::Infallible;
 const ACCEPT: usize = usize::MAX;
 const ICE_KEY: &[u8] = b"the/ice/password/constant";
-const LAST_SEEN: SocketAddr = SocketAddr::new(IpAddr::V6(Ipv6Addr::new(0xfe80, 0, 0, 0, 0xffff, 0xffff, 0xffff, 0xffff)), 65535);
+const LAST_SEEN: SocketAddr = SocketAddr::new(
+	IpAddr::V6(Ipv6Addr::new(
+		0xfe80, 0, 0, 0, 0xffff, 0xffff, 0xffff, 0xffff,
+	)),
+	65535,
+);
 
 // We assign a link-local ip for each tcp stream u64 <-> Link local ip
 fn make_ip(token: usize) -> IpAddr {
@@ -63,7 +70,9 @@ impl Turn {
 				}
 				Ok(Some((allocated, canonical, msg)))
 			}
-			Self::Tcp { stream, canonical, .. } => {
+			Self::Tcp {
+				stream, canonical, ..
+			} => {
 				let would_block = Err(io::Error::new(ErrorKind::WouldBlock, ""));
 				let allocated = SocketAddr::new(make_ip(e.token().0), canonical.port());
 				if e.is_writable() {
@@ -162,7 +171,7 @@ fn main() -> eyre::Result<Never> {
 					entry.insert(Turn::Tcp {
 						stream: BufWriter::with_capacity(BUFFER_LEN, stream),
 						canonical,
-						username: None
+						username: None,
 					});
 				}
 				continue;
@@ -470,11 +479,13 @@ fn main() -> eyre::Result<Never> {
 								msg.set_method(Method::Data);
 
 								// Place peer address
-								msg.append::<XOR_PEER_ADDRESS, SocketAddr>(if peer == LAST_SEEN || intercepted {
-									&peer
-								} else {
-									&allocated
-								})
+								msg.append::<XOR_PEER_ADDRESS, SocketAddr>(
+									if peer == LAST_SEEN || intercepted {
+										&peer
+									} else {
+										&allocated
+									},
+								)
 								.unwrap();
 
 								// Zero out the padding bytes:
@@ -488,10 +499,20 @@ fn main() -> eyre::Result<Never> {
 								// Relay the Data Indication
 								if !intercepted {
 									let key = if peer == LAST_SEEN {
-										let Turn::Tcp { username: Some(username), .. } = turn else { continue };
-										let Some((a, b)) = username.split_once(':') else { continue };
+										let Turn::Tcp {
+											username: Some(username),
+											..
+										} = turn
+										else {
+											continue;
+										};
+										let Some((a, b)) = username.split_once(':') else {
+											continue;
+										};
 										let swapped = format!("{b}:{a}");
-										let Some(key) = usernames.get(swapped.as_str()) else { continue };
+										let Some(key) = usernames.get(swapped.as_str()) else {
+											continue;
+										};
 										*key
 									} else {
 										get_key(peer.ip()).unwrap_or(udp_key)
@@ -529,7 +550,9 @@ fn main() -> eyre::Result<Never> {
 						poll.registry().deregister(stream.get_mut())?;
 
 						// Remove from usernames if it was already in the usernames.
-						if let Some(std::collections::btree_map::Entry::Occupied(entry)) = username.map(|u| usernames.entry(u)) {
+						if let Some(std::collections::btree_map::Entry::Occupied(entry)) =
+							username.map(|u| usernames.entry(u))
+						{
 							if *entry.get() == key {
 								entry.remove();
 							}
