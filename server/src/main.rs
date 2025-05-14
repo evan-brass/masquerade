@@ -1,16 +1,15 @@
-use std::{
-	collections::BTreeMap,
-	io::{self, BufWriter, ErrorKind, Read, Write},
-	net::{IpAddr, Ipv6Addr, Shutdown, SocketAddr},
-	rc::Rc,
-};
-
 use mio::{
 	event::Event,
 	net::{TcpListener, TcpStream, UdpSocket},
 	Events, Interest, Poll, Token,
 };
 use slab::Slab;
+use std::{
+	collections::BTreeSet,
+	io::{self, BufWriter, ErrorKind, Read, Write},
+	net::{IpAddr, Ipv6Addr, Shutdown, SocketAddr},
+	rc::Rc,
+};
 use stun::{attr::integrity::Integrity, attr::parse::AttrIter as _, attr::*, Class, Method, Stun};
 use tracing::trace;
 use tracing_subscriber::{prelude::*, EnvFilter};
@@ -18,7 +17,7 @@ use tracing_subscriber::{prelude::*, EnvFilter};
 type Never = core::convert::Infallible;
 const ACCEPT: usize = usize::MAX;
 const ICE_KEY: &[u8] = b"the/ice/password/constant";
-const LAST_SEEN: SocketAddr = SocketAddr::new(
+const SWITCHBOARD: SocketAddr = SocketAddr::new(
 	IpAddr::V6(Ipv6Addr::new(
 		0xfe80, 0, 0, 0, 0xffff, 0xffff, 0xffff, 0xffff,
 	)),
@@ -49,6 +48,7 @@ enum Turn {
 		stream: BufWriter<TcpStream>,
 		canonical: SocketAddr,
 		username: Option<Rc<str>>,
+		ufrag: Option<String>,
 	},
 }
 impl Turn {
@@ -129,7 +129,7 @@ fn main() -> eyre::Result<Never> {
 
 	let mut streams = Slab::new();
 	let mut events = Events::with_capacity(128);
-	let mut usernames = BTreeMap::new();
+	let mut usernames = BTreeSet::new();
 
 	let mut poll = Poll::new()?;
 	let addr = "[::]:3478".parse()?;
@@ -172,12 +172,13 @@ fn main() -> eyre::Result<Never> {
 						stream: BufWriter::with_capacity(BUFFER_LEN, stream),
 						canonical,
 						username: None,
+						ufrag: None,
 					});
 				}
 				continue;
 			}
 
-			loop {
+			'msg: loop {
 				let Some(turn) = streams.get_mut(e.token().0) else {
 					break;
 				};
@@ -295,7 +296,7 @@ fn main() -> eyre::Result<Never> {
 									if username.is_none() {
 										let temp: Rc<str> = Rc::from(turn_username);
 										*username = Some(temp.clone());
-										usernames.insert(temp, key);
+										usernames.insert((temp, key));
 									}
 								}
 
@@ -424,7 +425,23 @@ fn main() -> eyre::Result<Never> {
 										break 'intercept;
 									};
 
+									// Dissolve is like a threesome of ICE Agents: two full and one lite.  Once the connection is open and the full agents start renegotiating with new ICE credentials, I want the ice lite dissolve to stop responding.
+									match turn {
+										Turn::Tcp {
+											ufrag: Some(expected),
+											..
+										} if expected != src_ufrag => continue 'msg,
+										Turn::Tcp { ufrag, .. } if ufrag.is_none() => {
+											*ufrag = Some(src_ufrag.into());
+										}
+										_ => {}
+									}
+
 									if dst_ufrag != "dissolve" {
+										// ICE tests against SWITCHBOARD must be "dissolve"
+										if peer == SWITCHBOARD {
+											continue 'msg;
+										};
 										break 'intercept;
 									}
 
@@ -480,7 +497,7 @@ fn main() -> eyre::Result<Never> {
 
 								// Place peer address
 								msg.append::<XOR_PEER_ADDRESS, SocketAddr>(
-									if peer == LAST_SEEN || intercepted {
+									if peer == SWITCHBOARD || intercepted {
 										&peer
 									} else {
 										&allocated
@@ -498,7 +515,8 @@ fn main() -> eyre::Result<Never> {
 
 								// Relay the Data Indication
 								if !intercepted {
-									let key = if peer == LAST_SEEN {
+									let frame = &msg.buffer[..msg.len()];
+									if peer == SWITCHBOARD {
 										let Turn::Tcp {
 											username: Some(username),
 											..
@@ -509,19 +527,21 @@ fn main() -> eyre::Result<Never> {
 										let Some((a, b)) = username.split_once(':') else {
 											continue;
 										};
-										let swapped = format!("{b}:{a}");
-										let Some(key) = usernames.get(swapped.as_str()) else {
-											continue;
-										};
-										*key
+										let swapped: Rc<str> =
+											Rc::from(format!("{b}:{a}").as_str());
+										for (_, key) in usernames.range(
+											(swapped.clone(), usize::MIN)..(swapped, usize::MAX),
+										) {
+											if let Some(turn) = streams.get_mut(*key) {
+												let _ = turn.maybe_send(peer, frame);
+											}
+										}
 									} else {
-										get_key(peer.ip()).unwrap_or(udp_key)
-									};
-
-									let frame = &msg.buffer[..msg.len()];
-									if let Some(turn) = streams.get_mut(key) {
-										// TODO: Handle errors?  Or wait for them to propagate to read?
-										let _ = turn.maybe_send(peer, frame);
+										if let Some(turn) =
+											streams.get_mut(get_key(peer.ip()).unwrap_or(udp_key))
+										{
+											let _ = turn.maybe_send(peer, frame);
+										}
 									}
 
 									// Data already sent, don't respond.
@@ -532,7 +552,6 @@ fn main() -> eyre::Result<Never> {
 							_ => continue,
 						}
 
-						// TODO: Handle errors?  Or wait for them to propagate to read?
 						let _ = turn.maybe_send(allocated, &msg.buffer[..msg.len()]);
 					}
 					Err(e) if e.kind() == ErrorKind::WouldBlock => break,
@@ -548,14 +567,8 @@ fn main() -> eyre::Result<Never> {
 						};
 						trace!(?e, ?canonical, "CLOSE");
 						poll.registry().deregister(stream.get_mut())?;
-
-						// Remove from usernames if it was already in the usernames.
-						if let Some(std::collections::btree_map::Entry::Occupied(entry)) =
-							username.map(|u| usernames.entry(u))
-						{
-							if *entry.get() == key {
-								entry.remove();
-							}
+						if let Some(username) = username {
+							usernames.remove(&(username, key));
 						}
 
 						break;
