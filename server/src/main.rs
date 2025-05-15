@@ -10,6 +10,7 @@ use std::{
 	net::{IpAddr, Ipv6Addr, Shutdown, SocketAddr},
 	rc::Rc,
 };
+use rand::random;
 use stun::{attr::integrity::Integrity, attr::parse::AttrIter as _, attr::*, Class, Method, Stun};
 use tracing::trace;
 use tracing_subscriber::{prelude::*, EnvFilter};
@@ -444,6 +445,9 @@ fn main() -> eyre::Result<Never> {
 										};
 										break 'intercept;
 									}
+
+									// Drop 50% of ICE tests to make dissolve paths suck more (and encourage Chrome to switch to host / non-intercepted paths
+									if random() { continue 'msg; }
 
 									// Wrong credentials
 									if !integrity.verify(ICE_KEY) {
