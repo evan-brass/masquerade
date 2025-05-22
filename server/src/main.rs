@@ -147,8 +147,9 @@ fn main() -> eyre::Result<Never> {
 		entry.insert(Turn::Udp { socket });
 	}
 
-	const BUFFER_LEN: usize = 2048;
-	let mut buffer = [0; BUFFER_LEN];
+	const MAX_RECV_FRAME: usize = 16000;
+	const MAX_SEND_FRAME: usize = 2048;
+	let mut buffer = [0; MAX_RECV_FRAME];
 
 	loop {
 		for e in events.iter() {
@@ -170,7 +171,7 @@ fn main() -> eyre::Result<Never> {
 					let canonical = SocketAddr::new(addr.ip().to_canonical(), addr.port());
 					trace!(?canonical, "ACCEPT");
 					entry.insert(Turn::Tcp {
-						stream: BufWriter::with_capacity(BUFFER_LEN, stream),
+						stream: BufWriter::with_capacity(MAX_SEND_FRAME, stream),
 						canonical,
 						username: None,
 						ufrag: None,
