@@ -5,10 +5,14 @@ const config = {
 	iceTransportPolicy: 'relay',
 	iceServers: [{
 		urls: [
-			'turn:stun.evan-brass.net',
-			'turn:stun.evan-brass.net?transport=tcp',
+			// 'turn:stun.evan-brass.net',
+			// 'turn:stun.evan-brass.net?transport=tcp',
 			// 'turn:localhost',
 			// 'turn:localhost?transport=tcp',
+			// 'turn:raspberrypi.local',
+			// 'turn:raspberrypi.local?transport=tcp',
+			'turn:192.168.0.31',
+			'turn:192.168.0.31?transport=tcp',
 		],
 		username: 'guest',
 		credential: 'password'
@@ -19,6 +23,13 @@ const hosted = {
 	// TODO: Hosted doesn't exist at the moment...
 	candidate: `candidate:f 1 udp 42 fe80::1 65535 typ relay raddr :: rport 0`
 };
+function state(transitions) {
+	return new Promise(res => {
+		for (const [key, target] of Object.entries(transitions)) {
+			target.addEventListener(key, res, {once: true});
+		}
+	});
+}
 </script>
 <script>
 // Log everything.
@@ -82,10 +93,10 @@ function dissolve({ type, sdp }) {
 }
 
 await a.setLocalDescription();
-while (a.iceGatheringState != 'complete') await new Promise(res => a.addEventListener('icegatheringstatechange', res, {once: true}));
+while (a.iceGatheringState != 'complete') await state({'icegatheringstatechange': a});
 await b.setRemoteDescription(dissolve(a.localDescription));
 await b.setLocalDescription();
-while (b.iceGatheringState != 'complete') await new Promise(res => b.addEventListener('icegatheringstatechange', res, {once: true}));
+while (b.iceGatheringState != 'complete') await state({'icegatheringstatechange': b});
 await a.setRemoteDescription(dissolve(b.localDescription));
 </script>
 
@@ -99,10 +110,10 @@ log_everything(a, 'a');
 log_everything(b, 'b');
 
 await a.setLocalDescription();
-while (a.iceGatheringState != 'complete') await new Promise(res => a.addEventListener('icegatheringstatechange', res, { once: true }));
+while (a.iceGatheringState != 'complete') await state({'icegatheringstatechange': a});
 await b.setRemoteDescription(a.localDescription);
 
 await b.setLocalDescription();
-while (b.iceGatheringState != 'complete') await new Promise(res => b.addEventListener('icegatheringstatechange', res, { once: true }));
+while (b.iceGatheringState != 'complete') await state({'icegatheringstatechange': b});
 await a.setRemoteDescription(b.localDescription);
 </script>

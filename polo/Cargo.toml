@@ -1,0 +1,13 @@
+[package]
+name = "polo"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+eyre = "0.6.12"
+mio = { version = "1.0.4", features = ["net", "os-ext", "os-poll"] }
+turn = { path = "../turn" }
+stun = { path = "../stun" }
+tappers = "0.4.2"
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.19" }
