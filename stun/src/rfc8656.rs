@@ -3,7 +3,7 @@
 
 use crate::attr::{
 	values::{empty_attr, numeric_attr, slice_attr, sockaddr_attr},
-	Attr, AttrEnc, ADDRESS_ERROR_CODE, CHANNEL_NUMBER, EVEN_PORT, RESERVATION_TOKEN,
+	Attr, AttrEnc, ADDRESS_ERROR_CODE, CHANNEL_NUMBER, EVEN_PORT, RESERVATION_TOKEN, ICMP,
 };
 
 sockaddr_attr!(XOR_PEER_ADDRESS, true);
@@ -104,5 +104,30 @@ impl AttrEnc<RESERVATION_TOKEN> for [u8; 8] {
 	}
 	fn encode(&self, _: crate::attr::Prefix, value: &mut [u8]) {
 		value.copy_from_slice(self)
+	}
+}
+
+
+// TODO: https://www.rfc-editor.org/rfc/rfc8656.html#section-18.13 shows the ICMP Type as being 7 bits and the ICMP Code as being 9 bits.  I'm assuming this was a mistake since wikipedia show icmp4 and icmp6 as both having 8 bit types and codes.  I briefly checked coturn, and Chrome's WebRTC code, if they even parse ICMP attributes I didn't see it.  TURN, STUN, and WebRTC are all ass.
+impl Attr<'_, ICMP> for (u8, u8, [u8; 4]) {
+	type Error = core::array::TryFromSliceError;
+	fn decode(_: crate::attr::Prefix<'_>, value: &'_ [u8]) -> Result<Self, Self::Error> {
+		let [
+			_, _, typ, cod,
+			a, b, c, d
+		] = value.try_into()?;
+		Ok((typ, cod, [a, b, c, d]))
+	}
+}
+impl AttrEnc<ICMP> for (u8, u8, [u8; 4]) {
+	fn length(&self) -> u16 {
+		8
+	}
+	fn encode(&self, _: crate::attr::Prefix, value: &mut [u8]) {
+		value[0] = 0;
+		value[1] = 0;
+		value[2] = self.0;
+		value[3] = self.1;
+		value[4..8].copy_from_slice(&self.2);
 	}
 }

@@ -1,8 +1,8 @@
-use std::net::{IpAddr, Ipv6Addr, SocketAddr};
+use std::net::{IpAddr, SocketAddr};
 
 use rand::{random, rng, RngCore};
 use stun::{attr::{integrity::Integrity, parse::AttrIter as _, *}, Class, Method, Stun, MAGIC_COOKIE};
-use smoltcp::{phy::ChecksumCapabilities, wire::{IpAddress, IpProtocol, Ipv6Packet, Ipv6Repr, UdpPacket, UdpRepr}};
+use smoltcp::{phy::ChecksumCapabilities, wire::{Icmpv6Packet, Icmpv6Repr, IpAddress, IpProtocol, Ipv6Packet, Ipv6Repr, UdpPacket, UdpRepr}};
 
 #[derive(Debug, Clone, Copy)]
 pub enum Action {
@@ -359,23 +359,76 @@ pub fn handle_net(buffer: &mut [u8], length: usize) -> Action {
 	let Ok(Ipv6Repr {
 		src_addr,
 		dst_addr,
-		next_header: IpProtocol::Udp,
+		next_header,
 		..
 	}) = Ipv6Repr::parse(&ip) else { return Action::Drop };
-	let Ok(udp) = UdpPacket::new_checked(&buffer[40..length]) else { return Action::Drop };
-	let Ok(UdpRepr {
-		src_port,
-		dst_port
-	}) = UdpRepr::parse(&udp, &src_addr.into(), &dst_addr.into(), &checksum_caps) else { return Action::Drop };
 
-	// UDP -> TURN Data Indication
-	let receiver = unmap(SocketAddr::new(dst_addr.into(), dst_port));
-	let sender = SocketAddr::new(src_addr.into(), src_port);
+	println!("{src_addr} {dst_addr} {next_header}");
 
-	let len = udp.payload().len();
-	let padding = (4 - len % 4) % 4;
-	let Ok(stun_length) = u16::try_from(28 + len + padding) else { return Action::Drop };
+	enum Append {
+		Icmp {
+			typ: u8, code: u8,
+			error_data: [u8; 4]
+		},
+		Data {
+			len: usize, padding: usize, stun_length: u16,
+		}
+	}
+	impl Append {
+		fn append(self, msg: &mut Stun<&mut [u8]>) {
+			match self {
+				Self::Icmp { typ, code, error_data } => {
+					msg.append::<ICMP, _>(&(typ, code, error_data)).unwrap();
+				}
+				Self::Data { len, padding, stun_length } => {
+					// Zero out the padding bytes:
+					msg.buffer[48 + len..][..padding].fill(0);
 
+					// Write the length of the Data attribute and update the length of the STUN packet
+					msg.buffer[44..46].copy_from_slice(&DATA.to_be_bytes());
+					msg.buffer[46..48].copy_from_slice(&u16::to_be_bytes(len as u16));
+					msg.set_length(stun_length);
+				}
+			}
+		}
+	}
+
+	let (receiver, sender, append) = match next_header {
+		IpProtocol::Icmpv6 => {
+			let Ok(icmp) = Icmpv6Packet::new_checked(&buffer[40..length]) else { return Action::Drop };
+			let Ok(_) = Icmpv6Repr::parse(&src_addr, &dst_addr, &icmp, &checksum_caps) else { return Action::Drop };
+			let typ = icmp.msg_type().into();
+			let code = icmp.msg_code();
+			let error_data = buffer[44..48].try_into().unwrap();
+
+			// TODO: For Destination unreachable packets, look at the inner UDP packet for ports?
+			(
+				unmap(SocketAddr::new(dst_addr.into(), 4666)),
+				SocketAddr::new(src_addr.into(), 4666),
+				Append::Icmp { typ, code, error_data }
+			)
+		}
+		IpProtocol::Udp => {
+			let Ok(udp) = UdpPacket::new_checked(&buffer[40..length]) else { return Action::Drop };
+			let Ok(UdpRepr {
+				src_port,
+				dst_port
+			}) = UdpRepr::parse(&udp, &src_addr.into(), &dst_addr.into(), &checksum_caps) else { return Action::Drop };
+
+			// UDP -> TURN Data Indication
+			let receiver = unmap(SocketAddr::new(dst_addr.into(), dst_port));
+			let sender = SocketAddr::new(src_addr.into(), src_port);
+
+			let len = udp.payload().len();
+			let padding = (4 - len % 4) % 4;
+			let Ok(stun_length) = u16::try_from(28 + len + padding) else { return Action::Drop };
+
+			(receiver, sender, Append::Data { len, padding, stun_length })
+		}
+		_ => return Action::Drop
+	};
+
+	// Create a TURN message from this network message:
 	let mut msg = Stun { buffer };
 	msg.set_class(Class::Indication);
 	msg.set_method(Method::Data);
@@ -383,13 +436,7 @@ pub fn handle_net(buffer: &mut [u8], length: usize) -> Action {
 	msg.set_cookie(MAGIC_COOKIE);
 	rng().fill_bytes(msg.set_txid());
 	msg.append::<XOR_PEER_ADDRESS, _>(&sender).unwrap();
-
-	// Zero out the padding bytes:
-	msg.buffer[48 + len..][..padding].fill(0);
-
-	// Write the length of the Data attribute and update the length of the STUN packet
-	msg.buffer[46..48].copy_from_slice(&u16::to_be_bytes(len as u16));
-	msg.set_length(stun_length);
+	append.append(&mut msg);
 
 	Action::SendTo { length: msg.len(), receiver }
 }
