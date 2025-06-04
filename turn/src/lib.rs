@@ -1,17 +1,30 @@
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 
-use rand::random;
-use stun::{Stun, Method, Class, attr::*, attr::parse::AttrIter as _, attr::integrity::Integrity};
-use smoltcp::wire::{UdpPacket, Ipv6Packet, IpAddress};
+use rand::{random, rng, RngCore};
+use stun::{attr::{integrity::Integrity, parse::AttrIter as _, *}, Class, Method, Stun, MAGIC_COOKIE};
+use smoltcp::{phy::ChecksumCapabilities, wire::{IpAddress, IpProtocol, Ipv6Packet, Ipv6Repr, UdpPacket, UdpRepr}};
 
+#[derive(Debug, Clone, Copy)]
 pub enum Action {
 	Drop,
-	Respond {
-		length: usize
+	SendTo {
+		length: usize,
+		receiver: SocketAddr,
 	},
 	Forward {
 		length: usize
 	}
+}
+
+fn map(input: SocketAddr) -> SocketAddr {
+	let IpAddr::V6(peer) = input.ip() else { return input };
+	let [0, 0, 0, 0, 0, 0xffff, a, b] = peer.segments() else { return input };
+	SocketAddr::new(IpAddr::from([0xfd01, 0, 0, 0, 0, 0, a, b]), input.port())
+}
+fn unmap(input: SocketAddr) -> SocketAddr {
+	let IpAddr::V6(peer) = input.ip() else { return input };
+	let [0xfd01, 0, 0, 0, 0, 0, a, b] = peer.segments() else { return input };
+	SocketAddr::new(IpAddr::from([0, 0, 0, 0, 0, 0xffff, a, b]), input.port())
 }
 
 pub fn handle(mut msg: Stun<&mut [u8]>, sender: SocketAddr) -> Action {
@@ -126,7 +139,7 @@ pub fn handle(mut msg: Stun<&mut [u8]>, sender: SocketAddr) -> Action {
 			msg.set_length(0);
 			msg.set_class(Class::Success);
 			msg.append::<XOR_MAPPED_ADDRESS, _>(&canonical).unwrap();
-			msg.append::<XOR_RELAYED_ADDRESS, SocketAddr>(&sender)
+			msg.append::<XOR_RELAYED_ADDRESS, SocketAddr>(&map(sender))
 				.unwrap();
 			msg.append::<LIFETIME, _>(&lifetime.unwrap_or(1000))
 				.unwrap();
@@ -312,7 +325,7 @@ pub fn handle(mut msg: Stun<&mut [u8]>, sender: SocketAddr) -> Action {
 			// If the Send indication wasn't intercepted, then we'll emit it UDP datagram instead
 			if !intercepted {
 				let IpAddr::V6(dst_addr) = peer.ip() else { return Action::Drop };
-				let IpAddr::V6(src_addr) = sender.ip() else { return Action::Drop };
+				let IpAddr::V6(src_addr) = map(sender).ip() else { return Action::Drop };
 				let length = len as u16 + 8;
 
 				// IP6 + UDP = 40 + 8 = 48 = STUN Data Indication! Perfect.  No copy/shift needed.
@@ -337,5 +350,46 @@ pub fn handle(mut msg: Stun<&mut [u8]>, sender: SocketAddr) -> Action {
 		_ => return Action::Drop,
 	}
 
-	Action::Respond { length: msg.len() }
+	Action::SendTo { length: msg.len(), receiver: sender }
+}
+
+pub fn handle_net(buffer: &mut [u8], length: usize) -> Action {
+	let checksum_caps = ChecksumCapabilities::default();
+	let Ok(ip) = Ipv6Packet::new_checked(&buffer[..length]) else { return Action::Drop };
+	let Ok(Ipv6Repr {
+		src_addr,
+		dst_addr,
+		next_header: IpProtocol::Udp,
+		..
+	}) = Ipv6Repr::parse(&ip) else { return Action::Drop };
+	let Ok(udp) = UdpPacket::new_checked(&buffer[40..length]) else { return Action::Drop };
+	let Ok(UdpRepr {
+		src_port,
+		dst_port
+	}) = UdpRepr::parse(&udp, &src_addr.into(), &dst_addr.into(), &checksum_caps) else { return Action::Drop };
+
+	// UDP -> TURN Data Indication
+	let receiver = unmap(SocketAddr::new(dst_addr.into(), dst_port));
+	let sender = SocketAddr::new(src_addr.into(), src_port);
+
+	let len = udp.payload().len();
+	let padding = (4 - len % 4) % 4;
+	let Ok(stun_length) = u16::try_from(28 + len + padding) else { return Action::Drop };
+
+	let mut msg = Stun { buffer };
+	msg.set_class(Class::Indication);
+	msg.set_method(Method::Data);
+	msg.set_length(0);
+	msg.set_cookie(MAGIC_COOKIE);
+	rng().fill_bytes(msg.set_txid());
+	msg.append::<XOR_PEER_ADDRESS, _>(&sender).unwrap();
+
+	// Zero out the padding bytes:
+	msg.buffer[48 + len..][..padding].fill(0);
+
+	// Write the length of the Data attribute and update the length of the STUN packet
+	msg.buffer[46..48].copy_from_slice(&u16::to_be_bytes(len as u16));
+	msg.set_length(stun_length);
+
+	Action::SendTo { length: msg.len(), receiver }
 }
