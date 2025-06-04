@@ -16,17 +16,6 @@ pub enum Action {
 	}
 }
 
-fn map(input: SocketAddr) -> SocketAddr {
-	let IpAddr::V6(peer) = input.ip() else { return input };
-	let [0, 0, 0, 0, 0, 0xffff, a, b] = peer.segments() else { return input };
-	SocketAddr::new(IpAddr::from([0xfd01, 0, 0, 0, 0, 0, a, b]), input.port())
-}
-fn unmap(input: SocketAddr) -> SocketAddr {
-	let IpAddr::V6(peer) = input.ip() else { return input };
-	let [0xfd01, 0, 0, 0, 0, 0, a, b] = peer.segments() else { return input };
-	SocketAddr::new(IpAddr::from([0, 0, 0, 0, 0, 0xffff, a, b]), input.port())
-}
-
 pub fn handle(mut msg: Stun<&mut [u8]>, sender: SocketAddr) -> Action {
 	let canonical = SocketAddr::new(sender.ip().to_canonical(), sender.port());
 
@@ -139,7 +128,7 @@ pub fn handle(mut msg: Stun<&mut [u8]>, sender: SocketAddr) -> Action {
 			msg.set_length(0);
 			msg.set_class(Class::Success);
 			msg.append::<XOR_MAPPED_ADDRESS, _>(&canonical).unwrap();
-			msg.append::<XOR_RELAYED_ADDRESS, SocketAddr>(&map(sender))
+			msg.append::<XOR_RELAYED_ADDRESS, SocketAddr>(&sender)
 				.unwrap();
 			msg.append::<LIFETIME, _>(&lifetime.unwrap_or(1000))
 				.unwrap();
@@ -325,7 +314,7 @@ pub fn handle(mut msg: Stun<&mut [u8]>, sender: SocketAddr) -> Action {
 			// If the Send indication wasn't intercepted, then we'll emit it UDP datagram instead
 			if !intercepted {
 				let IpAddr::V6(dst_addr) = peer.ip() else { return Action::Drop };
-				let IpAddr::V6(src_addr) = map(sender).ip() else { return Action::Drop };
+				let IpAddr::V6(src_addr) = sender.ip() else { return Action::Drop };
 				let length = len as u16 + 8;
 
 				// IP6 + UDP = 40 + 8 = 48 = STUN Data Indication! Perfect.  No copy/shift needed.
@@ -403,7 +392,7 @@ pub fn handle_net(buffer: &mut [u8], length: usize) -> Action {
 
 			// TODO: For Destination unreachable packets, look at the inner UDP packet for ports?
 			(
-				unmap(SocketAddr::new(dst_addr.into(), 4666)),
+				SocketAddr::new(dst_addr.into(), 4666),
 				SocketAddr::new(src_addr.into(), 4666),
 				Append::Icmp { typ, code, error_data }
 			)
@@ -416,7 +405,7 @@ pub fn handle_net(buffer: &mut [u8], length: usize) -> Action {
 			}) = UdpRepr::parse(&udp, &src_addr.into(), &dst_addr.into(), &checksum_caps) else { return Action::Drop };
 
 			// UDP -> TURN Data Indication
-			let receiver = unmap(SocketAddr::new(dst_addr.into(), dst_port));
+			let receiver = SocketAddr::new(dst_addr.into(), dst_port);
 			let sender = SocketAddr::new(src_addr.into(), src_port);
 
 			let len = udp.payload().len();
