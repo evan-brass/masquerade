@@ -352,8 +352,6 @@ pub fn handle_net(buffer: &mut [u8], length: usize) -> Action {
 		..
 	}) = Ipv6Repr::parse(&ip) else { return Action::Drop };
 
-	println!("{src_addr} {dst_addr} {next_header}");
-
 	enum Append {
 		Icmp {
 			typ: u8, code: u8,

@@ -9,15 +9,20 @@ const config = {
 			// 'turn:stun.evan-brass.net?transport=tcp',
 			// 'turn:localhost',
 			// 'turn:localhost?transport=tcp',
-			// 'turn:raspberrypi.local',
-			// 'turn:raspberrypi.local?transport=tcp',
-			'turn:192.168.0.31',
-			'turn:192.168.0.31?transport=tcp',
+			'turn:rpi.local',
+			'turn:rpi.local?transport=tcp',
 		],
 		username: 'guest',
 		credential: 'password'
 	}]
 };
+function new_hosted([port, ...segments] = crypto.getRandomValues(new Uint16Array(8))) {
+	const ip = segments.reduce((a, s) => a + ':' + s.toString(16), 'fd03');
+	return {
+		sdpMLineIndex: 0,
+		candidate: `candidate:f 1 udp 42 ${ip} ${port} typ host raddr :: rport 0`
+	}
+}
 const hosted = {
 	sdpMLineIndex: 0,
 	// TODO: Hosted doesn't exist at the moment...

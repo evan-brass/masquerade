@@ -12,3 +12,4 @@ tappers = "0.4.2"
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.19" }
 clap = { version = "4.5.39", features = ["derive"] }
+slab = "0.4.9"

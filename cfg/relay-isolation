@@ -1,0 +1,24 @@
+#!/usr/bin/sh
+set -x
+
+# Create the interfaces
+ip link add relay-isolation type vrf table 1
+ip tuntap add turn mode tun
+ip link set turn master relay-isolation
+
+# Shuffle routing rules around
+ip rule del pref 1000
+ip rule add pref 32764 l3mdev
+ip -6 rule del pref 1000
+ip -6 rule add pref 32764 l3mdev
+ip rule add pref 32765 table local
+ip rule del pref 0
+ip -6 rule add pref 32765 table local
+ip -6 rule del pref 0
+ip rule del pref 32767
+
+# Links need to be on so that we can use them in routing rules
+ip link set relay-isolation up
+ip link set turn up
+
+ip -6 route add table 1 ::/0 dev turn
