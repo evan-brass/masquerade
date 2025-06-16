@@ -23,6 +23,10 @@ pub enum Action {
 
 impl Server {
 	pub fn handle_stun(&mut self, mut msg: Stun<&mut [u8]>, sender: SocketAddr) -> Action {
+		// A few proto checks to filter some false STUN traffic I saw
+		if msg.cookie() != MAGIC_COOKIE { return Action::Drop }
+		if msg.length() % 4 != 0 { return Action::Drop }
+
 		let canonical = SocketAddr::new(sender.ip().to_canonical(), sender.port());
 
 		// Parse TURN attributes
