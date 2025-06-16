@@ -1,15 +1,24 @@
-use std::{io::{self, BufWriter, ErrorKind}, net::{IpAddr, Shutdown, SocketAddr}, os::fd::AsRawFd};
 use std::io::{Read, Write};
+use std::{
+	io::{self, BufWriter, ErrorKind},
+	net::{IpAddr, Shutdown, SocketAddr},
+	os::fd::AsRawFd,
+};
 
 use clap::Parser;
 use eyre::Result;
-use mio::{event::Event, net::{TcpListener, UdpSocket}, unix::SourceFd, Events, Interest, Poll, Token};
+use mio::{
+	Events, Interest, Poll, Token,
+	event::Event,
+	net::{TcpListener, UdpSocket},
+	unix::SourceFd,
+};
 use slab::Slab;
-use tappers::{Interface, Tun};
 use stun::Stun;
+use tappers::{Interface, Tun};
 
 mod server;
-use crate::server::{Server, Action};
+use crate::server::{Action, Server};
 
 type Never = core::convert::Infallible;
 
@@ -35,10 +44,14 @@ struct Args {
 
 struct Conn {
 	canonical: SocketAddr,
-	stream: BufWriter<mio::net::TcpStream>
+	stream: BufWriter<mio::net::TcpStream>,
 }
 impl Conn {
-	pub fn handle<'i>(&mut self, e: &Event, buffer: &'i mut [u8]) -> Result<Stun<&'i mut [u8]>, io::Error> {
+	pub fn handle<'i>(
+		&mut self,
+		e: &Event,
+		buffer: &'i mut [u8],
+	) -> Result<Stun<&'i mut [u8]>, io::Error> {
 		let would_block = Err(io::Error::new(ErrorKind::WouldBlock, ""));
 		if e.is_writable() {
 			self.stream.flush()?;
@@ -60,7 +73,9 @@ impl Conn {
 				return would_block;
 			}
 			let exp_len = msg.len();
-			self.stream.get_ref().read_exact(&mut msg.buffer[..exp_len])?;
+			self.stream
+				.get_ref()
+				.read_exact(&mut msg.buffer[..exp_len])?;
 			return Ok(msg);
 		}
 		would_block
@@ -77,9 +92,13 @@ fn to_ip(site: u16, index: u64) -> IpAddr {
 fn from_ip(ip: IpAddr) -> Option<(u16, u64)> {
 	let IpAddr::V6(ip6) = ip else { return None };
 	let octets = ip6.octets();
-	if octets[0..2] != [0xfd, 0x01] { return None; }
+	if octets[0..2] != [0xfd, 0x01] {
+		return None;
+	}
 	let site = u16::from_be_bytes(octets[2..4].try_into().unwrap());
-	if octets[4..8] != [0, 0, 0, 0] { return None; }
+	if octets[4..8] != [0, 0, 0, 0] {
+		return None;
+	}
 	let index = u64::from_be_bytes(octets[8..].try_into().unwrap());
 	Some((site, index))
 }
@@ -104,9 +123,12 @@ fn main() -> Result<Never> {
 	network.set_nonblocking(true)?;
 
 	let mut poll = Poll::new()?;
-	poll.registry().register(&mut socket, UDP, Interest::READABLE)?;
-	poll.registry().register(&mut listen, TCP, Interest::READABLE)?;
-	poll.registry().register(&mut SourceFd(&network.as_raw_fd()), TUN, Interest::READABLE)?;
+	poll.registry()
+		.register(&mut socket, UDP, Interest::READABLE)?;
+	poll.registry()
+		.register(&mut listen, TCP, Interest::READABLE)?;
+	poll.registry()
+		.register(&mut SourceFd(&network.as_raw_fd()), TUN, Interest::READABLE)?;
 
 	let mut buffer = [0; 65536];
 	let mut events = Events::with_capacity(128);
@@ -118,56 +140,79 @@ fn main() -> Result<Never> {
 			loop {
 				let action = match e.token() {
 					TCP => {
-						let Ok((mut stream, canonical)) = listen.accept() else { break };
+						let Ok((mut stream, canonical)) = listen.accept() else {
+							break;
+						};
 						stream.set_nodelay(true)?;
 						let entry = streams.vacant_entry();
-						poll.registry().register(&mut stream, Token(entry.key()), Interest::READABLE | Interest::WRITABLE)?;
+						poll.registry().register(
+							&mut stream,
+							Token(entry.key()),
+							Interest::READABLE | Interest::WRITABLE,
+						)?;
 						entry.insert(Conn {
 							canonical,
-							stream: BufWriter::with_capacity(2048, stream)
+							stream: BufWriter::with_capacity(2048, stream),
 						});
 						continue;
 					}
 					UDP => {
-						let Ok((len, sender)) = socket.recv_from(&mut buffer) else { break };
-						let msg = Stun { buffer: buffer.as_mut_slice() };
-						if len < msg.len() { continue };
+						let Ok((len, sender)) = socket.recv_from(&mut buffer) else {
+							break;
+						};
+						let msg = Stun {
+							buffer: buffer.as_mut_slice(),
+						};
+						if len < msg.len() {
+							continue;
+						};
 						server.handle_stun(msg, sender)
 					}
 					TUN => {
-						let Ok(len) = network.recv(&mut buffer) else { break };
+						let Ok(len) = network.recv(&mut buffer) else {
+							break;
+						};
 						server.handle_net(buffer.as_mut_slice(), len)
 					}
 					Token(index) => {
-						let Some(stream) = streams.get_mut(index) else { break };
+						let Some(stream) = streams.get_mut(index) else {
+							break;
+						};
 						match stream.handle(e, &mut buffer) {
 							Ok(msg) => {
-								let sender = SocketAddr::new(to_ip(args.site, index as u64), stream.canonical.port());
+								let sender = SocketAddr::new(
+									to_ip(args.site, index as u64),
+									stream.canonical.port(),
+								);
 								server.handle_stun(msg, sender)
 							}
-							Err(e) if e.kind() == ErrorKind::WouldBlock => { break },
+							Err(e) if e.kind() == ErrorKind::WouldBlock => break,
 							Err(_) => {
-								let Conn { stream: mut inner, ..} = streams.remove(index);
+								let Conn {
+									stream: mut inner, ..
+								} = streams.remove(index);
 								poll.registry().deregister(inner.get_mut())?;
-								break
+								break;
 							}
 						}
 					}
 				};
 				match action {
-					Action::Drop => {},
-					Action::SendTo { length, receiver } => if let Some((site, index)) = from_ip(receiver.ip()) {
-						if args.site == site {
-							if let Some(Conn { stream, .. }) = streams.get_mut(index as usize) {
-								let spare_capacity = stream.capacity() - stream.buffer().len();
-								if length <= spare_capacity {
-									stream.write_all(&buffer[..length]).unwrap();
-									let _ = stream.flush();
+					Action::Drop => {}
+					Action::SendTo { length, receiver } => {
+						if let Some((site, index)) = from_ip(receiver.ip()) {
+							if args.site == site {
+								if let Some(Conn { stream, .. }) = streams.get_mut(index as usize) {
+									let spare_capacity = stream.capacity() - stream.buffer().len();
+									if length <= spare_capacity {
+										stream.write_all(&buffer[..length]).unwrap();
+										let _ = stream.flush();
+									}
 								}
 							}
+						} else {
+							let _ = socket.send_to(&buffer[..length], receiver);
 						}
-					} else {
-						let _ = socket.send_to(&buffer[..length], receiver);
 					}
 					Action::Forward { length } => {
 						let _ = network.send(&buffer[..length]);

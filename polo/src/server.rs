@@ -1,21 +1,24 @@
 use std::net::{IpAddr, SocketAddr};
 
-use rand::{random, rng, RngCore};
-use stun::{attr::{integrity::Integrity, parse::AttrIter as _, *}, Class, Method, Stun, MAGIC_COOKIE};
-use smoltcp::{phy::ChecksumCapabilities, wire::{Icmpv6Packet, Icmpv6Repr, IpAddress, IpProtocol, Ipv6Packet, Ipv6Repr, UdpPacket, UdpRepr}};
+use rand::{RngCore, random, rng};
+use smoltcp::{
+	phy::ChecksumCapabilities,
+	wire::{
+		Icmpv6Packet, Icmpv6Repr, IpAddress, IpProtocol, Ipv6Packet, Ipv6Repr, UdpPacket, UdpRepr,
+	},
+};
+use stun::{
+	Class, MAGIC_COOKIE, Method, Stun,
+	attr::{integrity::Integrity, parse::AttrIter as _, *},
+};
 
 pub struct Server {}
 
 #[derive(Debug, Clone, Copy)]
 pub enum Action {
 	Drop,
-	SendTo {
-		length: usize,
-		receiver: SocketAddr,
-	},
-	Forward {
-		length: usize
-	}
+	SendTo { length: usize, receiver: SocketAddr },
+	Forward { length: usize },
 }
 
 impl Server {
@@ -50,14 +53,15 @@ impl Server {
 		let method_unknown = !matches!(
 			msg.method(),
 			Method::Binding
-				| Method::Allocate | Method::Refresh
+				| Method::Allocate
+				| Method::Refresh
 				| Method::CreatePermission
-				| Method::Send | Method::ChannelBind
+				| Method::Send
+				| Method::ChannelBind
 		);
 
 		// Compute a long-term key for authentication
-		let turn_key = if let (Some(username), Some(realm), Some(_)) =
-			(username, realm, &integrity)
+		let turn_key = if let (Some(username), Some(realm), Some(_)) = (username, realm, &integrity)
 		{
 			let mut ctx = md5::Context::new();
 			ctx.consume(username);
@@ -116,9 +120,7 @@ impl Server {
 			}
 
 			// Non-UDP Allocate
-			(Class::Request, Method::Allocate)
-				if requested_transport != Some(17) =>
-			{
+			(Class::Request, Method::Allocate) if requested_transport != Some(17) => {
 				msg.set_length(0);
 				msg.set_class(Class::Error);
 				msg.append::<ERROR_CODE, _>(&(442, "")).unwrap();
@@ -194,9 +196,7 @@ impl Server {
 					if inner.len() != len {
 						break 'intercept;
 					}
-					if inner.class() != Class::Request
-						|| inner.method() != Method::Binding
-					{
+					if inner.class() != Class::Request || inner.method() != Method::Binding {
 						break 'intercept;
 					}
 
@@ -220,28 +220,19 @@ impl Server {
 						.collect_unknown::<1>();
 
 					// Make sure all expected attributes are present and no unexpected attributes exist
-					let (
-						None,
-						Some(username),
-						Some(integrity),
-						Some(_),
-						Some(_),
-						Some(()),
-					) = (
+					let (None, Some(username), Some(integrity), Some(_), Some(_), Some(())) = (
 						unknowns,
 						username,
 						integrity,
 						ice_controlled.xor(ice_controlling),
 						priority,
 						fingerprint,
-					)
-					else {
+					) else {
 						break 'intercept;
 					};
 
 					// Split the username into dst_ufrag and src_ufrag
-					let Some((dst_ufrag, src_ufrag)) = username.split_once(':')
-					else {
+					let Some((dst_ufrag, src_ufrag)) = username.split_once(':') else {
 						break 'intercept;
 					};
 
@@ -250,7 +241,9 @@ impl Server {
 					}
 
 					// Drop 50% of ICE tests to make dissolve paths suck more (and encourage Chrome to switch to host / non-intercepted paths
-					if random() { return Action::Drop }
+					if random() {
+						return Action::Drop;
+					}
 
 					let ice_key = b"the/ice/password/constant";
 					// Wrong credentials
@@ -263,24 +256,26 @@ impl Server {
 					// ICE Controlled - error switch role
 					else if ice_controlled.is_some() {
 						/*
-						* HACK: Firefox doesn't support 487
-						* ISSUE: https://bugzilla.mozilla.org/show_bug.cgi?id=1940001
-						*/
+							* HACK: Firefox doesn't support 487
+							* ISSUE: https://bugzilla.mozilla.org/show_bug.cgi?id=1940001
+							*/
 						if turn_fingerprint.is_some() {
 							let username = format!("{src_ufrag}:{dst_ufrag}");
 							inner.set_length(0);
-							inner
-								.append::<USERNAME, &str>(&username.as_str())
-								.unwrap();
+							inner.append::<USERNAME, &str>(&username.as_str()).unwrap();
 							inner.append::<ICE_CONTROLLED, u64>(&u64::MIN).unwrap();
 							// inner.append::<PRIORITY, u32>(&0xdeadbeef).unwrap();
-							inner.append::<MESSAGE_INTEGRITY, _>(&ice_key.as_slice()).unwrap();
+							inner
+								.append::<MESSAGE_INTEGRITY, _>(&ice_key.as_slice())
+								.unwrap();
 							inner.append::<FINGERPRINT, _>(&()).unwrap();
 						} else {
 							inner.set_length(0);
 							inner.set_class(Class::Error);
 							inner.append::<ERROR_CODE, _>(&(487, "")).unwrap();
-							inner.append::<MESSAGE_INTEGRITY, _>(&ice_key.as_slice()).unwrap();
+							inner
+								.append::<MESSAGE_INTEGRITY, _>(&ice_key.as_slice())
+								.unwrap();
 							inner.append::<FINGERPRINT, _>(&()).unwrap();
 						}
 					}
@@ -291,7 +286,9 @@ impl Server {
 						inner
 							.append::<XOR_MAPPED_ADDRESS, SocketAddr>(&sender)
 							.unwrap();
-						inner.append::<MESSAGE_INTEGRITY, _>(&ice_key.as_slice()).unwrap();
+						inner
+							.append::<MESSAGE_INTEGRITY, _>(&ice_key.as_slice())
+							.unwrap();
 						inner.append::<FINGERPRINT, _>(&()).unwrap();
 					}
 
@@ -316,8 +313,12 @@ impl Server {
 
 				// If the Send indication wasn't intercepted, then we'll emit it UDP datagram instead
 				if !intercepted {
-					let IpAddr::V6(dst_addr) = peer.ip() else { return Action::Drop };
-					let IpAddr::V6(src_addr) = sender.ip() else { return Action::Drop };
+					let IpAddr::V6(dst_addr) = peer.ip() else {
+						return Action::Drop;
+					};
+					let IpAddr::V6(src_addr) = sender.ip() else {
+						return Action::Drop;
+					};
 					let length = len as u16 + 8;
 
 					// IP6 + UDP = 40 + 8 = 48 = STUN Data Indication! Perfect.  No copy/shift needed.
@@ -342,35 +343,54 @@ impl Server {
 			_ => return Action::Drop,
 		}
 
-		Action::SendTo { length: msg.len(), receiver: sender }
+		Action::SendTo {
+			length: msg.len(),
+			receiver: sender,
+		}
 	}
 
 	pub fn handle_net(&mut self, buffer: &mut [u8], length: usize) -> Action {
 		let checksum_caps = ChecksumCapabilities::default();
-		let Ok(ip) = Ipv6Packet::new_checked(&buffer[..length]) else { return Action::Drop };
+		let Ok(ip) = Ipv6Packet::new_checked(&buffer[..length]) else {
+			return Action::Drop;
+		};
 		let Ok(Ipv6Repr {
 			src_addr,
 			dst_addr,
 			next_header,
 			..
-		}) = Ipv6Repr::parse(&ip) else { return Action::Drop };
+		}) = Ipv6Repr::parse(&ip)
+		else {
+			return Action::Drop;
+		};
 
 		enum Append {
 			Icmp {
-				typ: u8, code: u8,
-				error_data: [u8; 4]
+				typ: u8,
+				code: u8,
+				error_data: [u8; 4],
 			},
 			Data {
-				len: usize, padding: usize, stun_length: u16,
-			}
+				len: usize,
+				padding: usize,
+				stun_length: u16,
+			},
 		}
 		impl Append {
 			fn append(self, msg: &mut Stun<&mut [u8]>) {
 				match self {
-					Self::Icmp { typ, code, error_data } => {
+					Self::Icmp {
+						typ,
+						code,
+						error_data,
+					} => {
 						msg.append::<ICMP, _>(&(typ, code, error_data)).unwrap();
 					}
-					Self::Data { len, padding, stun_length } => {
+					Self::Data {
+						len,
+						padding,
+						stun_length,
+					} => {
 						// Zero out the padding bytes:
 						msg.buffer[48 + len..][..padding].fill(0);
 
@@ -385,8 +405,12 @@ impl Server {
 
 		let (receiver, sender, append) = match next_header {
 			IpProtocol::Icmpv6 => {
-				let Ok(icmp) = Icmpv6Packet::new_checked(&buffer[40..length]) else { return Action::Drop };
-				let Ok(_) = Icmpv6Repr::parse(&src_addr, &dst_addr, &icmp, &checksum_caps) else { return Action::Drop };
+				let Ok(icmp) = Icmpv6Packet::new_checked(&buffer[40..length]) else {
+					return Action::Drop;
+				};
+				let Ok(_) = Icmpv6Repr::parse(&src_addr, &dst_addr, &icmp, &checksum_caps) else {
+					return Action::Drop;
+				};
 				let typ = icmp.msg_type().into();
 				let code = icmp.msg_code();
 				let error_data = buffer[44..48].try_into().unwrap();
@@ -395,15 +419,22 @@ impl Server {
 				(
 					SocketAddr::new(dst_addr.into(), 4666),
 					SocketAddr::new(src_addr.into(), 4666),
-					Append::Icmp { typ, code, error_data }
+					Append::Icmp {
+						typ,
+						code,
+						error_data,
+					},
 				)
 			}
 			IpProtocol::Udp => {
-				let Ok(udp) = UdpPacket::new_checked(&buffer[40..length]) else { return Action::Drop };
-				let Ok(UdpRepr {
-					src_port,
-					dst_port
-				}) = UdpRepr::parse(&udp, &src_addr.into(), &dst_addr.into(), &checksum_caps) else { return Action::Drop };
+				let Ok(udp) = UdpPacket::new_checked(&buffer[40..length]) else {
+					return Action::Drop;
+				};
+				let Ok(UdpRepr { src_port, dst_port }) =
+					UdpRepr::parse(&udp, &src_addr.into(), &dst_addr.into(), &checksum_caps)
+				else {
+					return Action::Drop;
+				};
 
 				// UDP -> TURN Data Indication
 				let receiver = SocketAddr::new(dst_addr.into(), dst_port);
@@ -411,11 +442,21 @@ impl Server {
 
 				let len = udp.payload().len();
 				let padding = (4 - len % 4) % 4;
-				let Ok(stun_length) = u16::try_from(28 + len + padding) else { return Action::Drop };
+				let Ok(stun_length) = u16::try_from(28 + len + padding) else {
+					return Action::Drop;
+				};
 
-				(receiver, sender, Append::Data { len, padding, stun_length })
+				(
+					receiver,
+					sender,
+					Append::Data {
+						len,
+						padding,
+						stun_length,
+					},
+				)
 			}
-			_ => return Action::Drop
+			_ => return Action::Drop,
 		};
 
 		// Create a TURN message from this network message:
@@ -428,6 +469,9 @@ impl Server {
 		msg.append::<XOR_PEER_ADDRESS, _>(&sender).unwrap();
 		append.append(&mut msg);
 
-		Action::SendTo { length: msg.len(), receiver }
+		Action::SendTo {
+			length: msg.len(),
+			receiver,
+		}
 	}
 }
