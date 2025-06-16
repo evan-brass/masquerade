@@ -6,8 +6,10 @@ use eyre::Result;
 use mio::{event::Event, net::{TcpListener, UdpSocket}, unix::SourceFd, Events, Interest, Poll, Token};
 use slab::Slab;
 use tappers::{Interface, Tun};
-use turn::{handle, handle_net, Action};
 use stun::Stun;
+
+mod server;
+use crate::server::{Server, Action};
 
 type Never = core::convert::Infallible;
 
@@ -109,6 +111,7 @@ fn main() -> Result<Never> {
 	let mut buffer = [0; 65536];
 	let mut events = Events::with_capacity(128);
 	let mut streams = Slab::new();
+	let mut server = Server {};
 
 	loop {
 		for e in events.into_iter() {
@@ -129,18 +132,18 @@ fn main() -> Result<Never> {
 						let Ok((len, sender)) = socket.recv_from(&mut buffer) else { break };
 						let msg = Stun { buffer: buffer.as_mut_slice() };
 						if len < msg.len() { continue };
-						handle(msg, sender)
+						server.handle_stun(msg, sender)
 					}
 					TUN => {
 						let Ok(len) = network.recv(&mut buffer) else { break };
-						handle_net(buffer.as_mut_slice(), len)
+						server.handle_net(buffer.as_mut_slice(), len)
 					}
 					Token(index) => {
 						let Some(stream) = streams.get_mut(index) else { break };
 						match stream.handle(e, &mut buffer) {
 							Ok(msg) => {
 								let sender = SocketAddr::new(to_ip(args.site, index as u64), stream.canonical.port());
-								handle(msg, sender)
+								server.handle_stun(msg, sender)
 							}
 							Err(e) if e.kind() == ErrorKind::WouldBlock => { break },
 							Err(_) => {

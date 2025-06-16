@@ -348,13 +348,15 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "eyre",
+ "md5",
  "mio",
+ "rand",
  "slab",
+ "smoltcp",
  "stun",
  "tappers",
  "tracing",
  "tracing-subscriber",
- "turn",
 ]
 
 [[package]]
@@ -589,16 +591,6 @@ dependencies = [
  "thread_local",
  "tracing-core",
  "tracing-log",
-]
-
-[[package]]
-name = "turn"
-version = "0.1.0"
-dependencies = [
- "md5",
- "rand",
- "smoltcp",
- "stun",
 ]
 
 [[package]]
