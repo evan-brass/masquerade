@@ -74,7 +74,7 @@ pub fn handle(mut msg: Stun<&mut [u8]>, sender: SocketAddr) -> Action {
 		(Class::Request, Method::Binding) => {
 			msg.set_length(0);
 			msg.set_class(Class::Success);
-			msg.append::<XOR_MAPPED_ADDRESS, SocketAddr>(&sender)
+			msg.append::<XOR_MAPPED_ADDRESS, SocketAddr>(&canonical)
 				.unwrap();
 		}
 
