@@ -8,4 +8,4 @@ WantedBy=multi-user.target
 [Service]
 Restart=always
 Environment=RUST_LOG="trace"
-ExecStart=/usr/sbin/polo -i turn
+ExecStart=/usr/sbin/turn-gateway -i turn
