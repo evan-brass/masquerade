@@ -1,0 +1,7 @@
+[Unit]
+Description=Capture packets
+
+[Service]
+Restart=Always
+ExecStart=tcpdump -i any -w /var/tmp/trace -W 3 -G 86400 -C 1000 -K not tcp port 22
+
