@@ -16,16 +16,15 @@ pub struct Server {}
 
 #[derive(Debug, Clone, Copy)]
 pub enum Action {
-	Drop,
 	SendTo { length: usize, receiver: SocketAddr },
 	Forward { length: usize },
 }
 
 impl Server {
-	pub fn handle_stun(&mut self, mut msg: Stun<&mut [u8]>, sender: SocketAddr) -> Action {
+	pub fn handle_stun(&mut self, mut msg: Stun<&mut [u8]>, sender: SocketAddr) -> Option<Action> {
 		// A few proto checks to filter some false STUN traffic I saw
-		if msg.cookie() != MAGIC_COOKIE { return Action::Drop }
-		if msg.length() % 4 != 0 { return Action::Drop }
+		if msg.cookie() != MAGIC_COOKIE { return None }
+		if msg.length() % 4 != 0 { return None }
 
 		let canonical = SocketAddr::new(sender.ip().to_canonical(), sender.port());
 
@@ -79,7 +78,7 @@ impl Server {
 
 		match (msg.class(), msg.method()) {
 			// Ignore Responses (we are a server, we shouldn't be receiving them)
-			(Class::Error | Class::Success, _) => return Action::Drop,
+			(Class::Error | Class::Success, _) => return None,
 
 			// Binding:
 			(Class::Request, Method::Binding) => {
@@ -104,7 +103,7 @@ impl Server {
 				msg.append::<UNKNOWN_ATTRIBUTES, _>(&unknown_attrs.unwrap())
 					.unwrap();
 			}
-			_ if unknown_attrs.is_some() => return Action::Drop,
+			_ if unknown_attrs.is_some() => return None,
 
 			// Unauthenticated Request
 			(Class::Request, _) if username.is_none() || realm.is_none() => {
@@ -116,7 +115,7 @@ impl Server {
 			}
 
 			// Forbidden
-			(Class::Request, _) if integrity.is_none() => return Action::Drop,
+			(Class::Request, _) if integrity.is_none() => return None,
 			(Class::Request, _) if !integrity.unwrap().verify(&turn_key) => {
 				msg.set_length(0);
 				msg.set_class(Class::Error);
@@ -146,7 +145,7 @@ impl Server {
 			}
 
 			// Refresh
-			(Class::Request, Method::Refresh) if lifetime == Some(0) => return Action::Drop,
+			(Class::Request, Method::Refresh) if lifetime == Some(0) => return None,
 			(Class::Request, Method::Refresh) => {
 				msg.set_length(0);
 				msg.set_class(Class::Success);
@@ -176,7 +175,7 @@ impl Server {
 			// Send
 			(Class::Indication, Method::Send) => {
 				let (Some(peer), Some(data)) = (xor_peer, data) else {
-					return Action::Drop;
+					return None;
 				};
 
 				// Shift the data attribute to where we want it
@@ -184,7 +183,7 @@ impl Server {
 				let mut len = data.len();
 				let i = data.as_ptr() as usize - 4 - msg.buffer.as_ptr() as usize;
 				if 48 + data.len() > msg.buffer.len() {
-					return Action::Drop;
+					return None;
 				}
 				msg.buffer.copy_within(i..i + 4 + len, 44);
 				let data = &mut msg.buffer[48..][..len];
@@ -246,7 +245,7 @@ impl Server {
 
 					// Drop 50% of ICE tests to make dissolve paths suck more (and encourage Chrome to switch to host / non-intercepted paths
 					if random() {
-						return Action::Drop;
+						return None;
 					}
 
 					let ice_key = b"the/ice/password/constant";
@@ -318,10 +317,10 @@ impl Server {
 				// If the Send indication wasn't intercepted, then we'll emit it UDP datagram instead
 				if !intercepted {
 					let IpAddr::V6(dst_addr) = peer.ip() else {
-						return Action::Drop;
+						return None;
 					};
 					let IpAddr::V6(src_addr) = sender.ip() else {
-						return Action::Drop;
+						return None;
 					};
 					let length = len as u16 + 8;
 
@@ -341,22 +340,22 @@ impl Server {
 					ip.set_src_addr(src_addr);
 					ip.set_dst_addr(dst_addr);
 
-					return Action::Forward { length: 48 + len };
+					return Some(Action::Forward { length: 48 + len });
 				}
 			}
-			_ => return Action::Drop,
+			_ => return None,
 		}
 
-		Action::SendTo {
+		Some(Action::SendTo {
 			length: msg.len(),
 			receiver: sender,
-		}
+		})
 	}
 
-	pub fn handle_net(&mut self, buffer: &mut [u8], length: usize) -> Action {
+	pub fn handle_net(&mut self, buffer: &mut [u8], length: usize) -> Option<Action> {
 		let checksum_caps = ChecksumCapabilities::default();
 		let Ok(ip) = Ipv6Packet::new_checked(&buffer[..length]) else {
-			return Action::Drop;
+			return None;
 		};
 		let Ok(Ipv6Repr {
 			src_addr,
@@ -365,7 +364,7 @@ impl Server {
 			..
 		}) = Ipv6Repr::parse(&ip)
 		else {
-			return Action::Drop;
+			return None;
 		};
 
 		enum Append {
@@ -410,10 +409,10 @@ impl Server {
 		let (receiver, sender, append) = match next_header {
 			IpProtocol::Icmpv6 => {
 				let Ok(icmp) = Icmpv6Packet::new_checked(&buffer[40..length]) else {
-					return Action::Drop;
+					return None;
 				};
 				let Ok(_) = Icmpv6Repr::parse(&src_addr, &dst_addr, &icmp, &checksum_caps) else {
-					return Action::Drop;
+					return None;
 				};
 				let typ = icmp.msg_type().into();
 				let code = icmp.msg_code();
@@ -432,12 +431,12 @@ impl Server {
 			}
 			IpProtocol::Udp => {
 				let Ok(udp) = UdpPacket::new_checked(&buffer[40..length]) else {
-					return Action::Drop;
+					return None;
 				};
 				let Ok(UdpRepr { src_port, dst_port }) =
 					UdpRepr::parse(&udp, &src_addr.into(), &dst_addr.into(), &checksum_caps)
 				else {
-					return Action::Drop;
+					return None;
 				};
 
 				// UDP -> TURN Data Indication
@@ -447,7 +446,7 @@ impl Server {
 				let len = udp.payload().len();
 				let padding = (4 - len % 4) % 4;
 				let Ok(stun_length) = u16::try_from(28 + len + padding) else {
-					return Action::Drop;
+					return None;
 				};
 
 				(
@@ -460,7 +459,7 @@ impl Server {
 					},
 				)
 			}
-			_ => return Action::Drop,
+			_ => return None,
 		};
 
 		// Create a TURN message from this network message:
@@ -473,9 +472,9 @@ impl Server {
 		msg.append::<XOR_PEER_ADDRESS, _>(&sender).unwrap();
 		append.append(&mut msg);
 
-		Action::SendTo {
+		Some(Action::SendTo {
 			length: msg.len(),
 			receiver,
-		}
+		})
 	}
 }

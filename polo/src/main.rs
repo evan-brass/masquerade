@@ -198,8 +198,7 @@ fn main() -> Result<Never> {
 					}
 				};
 				match action {
-					Action::Drop => {}
-					Action::SendTo { length, receiver } => {
+					Some(Action::SendTo { length, receiver }) => {
 						if let Some((site, index)) = from_ip(receiver.ip()) {
 							if args.site == site {
 								if let Some(Conn { stream, .. }) = streams.get_mut(index as usize) {
@@ -214,9 +213,10 @@ fn main() -> Result<Never> {
 							let _ = socket.send_to(&buffer[..length], receiver);
 						}
 					}
-					Action::Forward { length } => {
+					Some(Action::Forward { length }) => {
 						let _ = network.send(&buffer[..length]);
 					}
+					None => {}
 				}
 			}
 		}
