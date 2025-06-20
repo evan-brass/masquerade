@@ -9,7 +9,7 @@ mio = { version = "1.0.4", features = ["net", "os-ext", "os-poll"] }
 stun = { path = "../stun" }
 tappers = "0.4.2"
 tracing = "0.1.41"
-tracing-subscriber = { version = "0.3.19" }
+tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
 clap = { version = "4.5.39", features = ["derive"] }
 slab = "0.4.9"
 md5 = "0.7.0"

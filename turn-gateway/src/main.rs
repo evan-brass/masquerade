@@ -16,6 +16,7 @@ use mio::{
 use slab::Slab;
 use stun::Stun;
 use tappers::{Interface, Tun};
+use tracing_subscriber::EnvFilter;
 
 mod server;
 use crate::server::{Action, Server};
@@ -105,7 +106,9 @@ fn from_ip(ip: IpAddr) -> Option<(u16, u64)> {
 
 fn main() -> Result<Never> {
 	// Enable logging
-	tracing_subscriber::fmt().init();
+	tracing_subscriber::fmt()
+		.with_env_filter(EnvFilter::from_default_env())
+		.init();
 
 	// Parse command line arguments
 	let args = Args::try_parse()?;
