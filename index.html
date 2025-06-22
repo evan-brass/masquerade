@@ -16,18 +16,13 @@ const config = {
 		credential: 'password'
 	}]
 };
-function new_hosted([port, ...segments] = crypto.getRandomValues(new Uint16Array(8))) {
-	const ip = segments.reduce((a, s) => a + ':' + s.toString(16), 'fd03');
+function hosted([port, ...segments] = crypto.getRandomValues(new Uint16Array(8))) {
+	const ip = segments.reduce((a, s) => a + ':' + s.toString(16), 'fd02');
 	return {
 		sdpMLineIndex: 0,
 		candidate: `candidate:f 1 udp 42 ${ip} ${port} typ host raddr :: rport 0`
 	}
 }
-const hosted = {
-	sdpMLineIndex: 0,
-	// TODO: Hosted doesn't exist at the moment...
-	candidate: `candidate:f 1 udp 42 fe80::1 65535 typ relay raddr :: rport 0`
-};
 function state(transitions) {
 	return new Promise(res => {
 		for (const [key, target] of Object.entries(transitions)) {
@@ -51,7 +46,7 @@ function log_everything(conn, label = conn.pid) {
 </script>
 
 <!-- Hosted -->
-<script type="_module">
+<script type="module">
 const h = new RTCPeerConnection(config);
 log_everything(h, 'h');
 await h.setRemoteDescription({type:'offer',sdp:`v=0
@@ -59,22 +54,18 @@ o=- 42 2 IN IP4 0.0.0.0
 s=-
 t=0 0
 a=BUNDLE dc
-a=ice-ufrag:doesntmatter
+a=ice-ufrag:dissolve
 a=ice-pwd:the/ice/password/constant
-a=fingerprint:sha-256 C3:E4:A4:B9:DD:56:08:7E:A6:15:5E:F7:EB:0F:BD:24:EB:C4:D4:AD:92:33:91:31:F4:37:3E:C5:57:44:11:D5
+a=ice-lite
+a=fingerprint:sha-256 48:1C:78:26:14:D1:79:E1:97:2B:A4:EC:B4:50:AD:0D:E6:2E:30:78:15:26:FC:22:6D:BA:62:45:22:31:72:91
 m=application 9 UDP/DTLS/SCTP webrtc-datachannel
 c=IN IP4 0.0.0.0
 a=mid:dc
 a=setup:passive
 a=sctp-port:5000
 `});
-let answer;
-if (is_firefox) {
-	answer = await h.createAnswer();
-	answer.sdp = answer.sdp.replace(/a=ice-pwd:.+/img, 'a=ice-pwd:the/ice/password/constant');
-}
-await h.setLocalDescription(answer);
-await h.addIceCandidate(hosted);
+await h.setLocalDescription();
+await h.addIceCandidate(hosted());
 console.log(h.localDescription.type, h.localDescription.sdp);
 </script>
 
@@ -106,7 +97,7 @@ await a.setRemoteDescription(dissolve(b.localDescription));
 </script>
 
 <!-- Relay only a<->b -->
-<script type="module">
+<script type="_module">
 const a = new RTCPeerConnection(config);
 const b = new RTCPeerConnection(config);
 a.createDataChannel('');

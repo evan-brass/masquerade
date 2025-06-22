@@ -1,0 +1,11 @@
+[Unit]
+Description=DTLS server that listens on a TUN interface allowing you to use a range of ip addresses instead of CID.  Assumes that the inner data is SCTP and re-emits to the network.
+After=relay-isolation.service
+
+[Install]
+WantedBy=multi-user.target
+
+[Service]
+Restart=always
+Environment=RUST_LOG=trace
+ExecStart=/usr/sbin/dtls-proxy -i dtls -c /var/opt/cert.pem

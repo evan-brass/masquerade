@@ -1,0 +1,15 @@
+[package]
+name = "dtls-proxy"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+clap = { version = "4.5.40", features = ["derive"] }
+eyre = "0.6.12"
+mio = { version = "1.0.4", features = ["os-poll", "net", "os-ext"] }
+openssl = { version = "0.10.73", features = ["vendored"] }
+openssl-sys = "0.9.109"
+tappers = "0.4.2"
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
+wire = { path = "../wire" }
