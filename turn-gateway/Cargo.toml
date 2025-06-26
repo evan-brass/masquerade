@@ -14,4 +14,4 @@ clap = { version = "4.5.39", features = ["derive"] }
 slab = "0.4.9"
 md5 = "0.7.0"
 rand = "0.9.1"
-smoltcp = { version = "0.12.0", default-features = false, features = ["proto-ipv6"] }
+wire = { path = "../wire" }

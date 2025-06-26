@@ -1,16 +1,11 @@
 use std::net::{IpAddr, SocketAddr};
 
 use rand::{RngCore, random, rng};
-use smoltcp::{
-	phy::ChecksumCapabilities,
-	wire::{
-		Icmpv6Packet, Icmpv6Repr, IpAddress, IpProtocol, Ipv6Packet, Ipv6Repr, UdpPacket, UdpRepr,
-	},
-};
 use stun::{
 	Class, MAGIC_COOKIE, Method, Stun,
 	attr::{integrity::Integrity, parse::AttrIter as _, *},
 };
+use wire::{ip_proto, FromBytes, Ip6Header, StunAttrHeader, UdpHeader};
 
 pub struct Server {}
 
@@ -329,22 +324,20 @@ impl Server {
 					let length = len as u16 + 8;
 
 					// IP6 + UDP = 40 + 8 = 48 = STUN Data Indication! Perfect.  No copy/shift needed.
-					let mut udp = UdpPacket::new_unchecked(&mut msg.buffer[40..]);
-					udp.set_dst_port(peer.port());
-					udp.set_src_port(sender.port());
-					udp.set_len(length);
-					udp.fill_checksum(&IpAddress::Ipv6(src_addr), &IpAddress::Ipv6(dst_addr));
-					let mut ip = Ipv6Packet::new_unchecked(&mut msg.buffer);
-					ip.set_version(6);
-					ip.set_traffic_class(0);
-					ip.set_flow_label(0);
-					ip.set_payload_len(length);
-					ip.set_hop_limit(5);
-					ip.set_next_header(smoltcp::wire::IpProtocol::Udp);
-					ip.set_src_addr(src_addr);
-					ip.set_dst_addr(dst_addr);
+					let (ip, rest) = Ip6Header::mut_from_prefix(&mut msg.buffer).unwrap();
+					let (udp, _) = UdpHeader::mut_from_prefix(rest).unwrap();
+					ip.flags.set(6 << 28);
+					ip.payload_length.set(length);
+					ip.next_header = ip_proto::UDP;
+					ip.hop_limit = 5;
+					ip.src = src_addr.octets();
+					ip.dst = dst_addr.octets();
+					udp.src_port.set(sender.port());
+					udp.dst_port.set(peer.port());
+					udp.length.set(length);
+					udp.checksum.set(0);
 
-					return Some(Action::Forward { length: 48 + len });
+					return Some(Action::Forward { length: ip.len() });
 				}
 			}
 			_ => return None,
@@ -357,128 +350,48 @@ impl Server {
 	}
 
 	pub fn handle_net(&mut self, buffer: &mut [u8], length: usize) -> Option<Action> {
-		let checksum_caps = ChecksumCapabilities::default();
-		let Ok(ip) = Ipv6Packet::new_checked(&buffer[..length]) else {
-			return None;
-		};
-		let Ok(Ipv6Repr {
-			src_addr,
-			dst_addr,
-			next_header,
-			..
-		}) = Ipv6Repr::parse(&ip)
-		else {
-			return None;
-		};
+		let (ip, rest) = Ip6Header::mut_from_prefix(buffer).unwrap();
+		if ip.flags.get() >> 28 != 6 { return None }
+		if ip.len() != length { return None }
+		match ip.next_header {
+			ip_proto::UDP if ip.payload_length.get() > 8 => {
+				let (udp, _) = UdpHeader::mut_from_prefix(rest).unwrap();
+				if udp.length != ip.payload_length { return None }
+				let padding = udp.length.get() % 4;
 
-		enum Append {
-			Icmp {
-				typ: u8,
-				code: u8,
-				error_data: [u8; 4],
-			},
-			Data {
-				len: usize,
-				padding: usize,
-				stun_length: u16,
-			},
-		}
-		impl Append {
-			fn append(self, msg: &mut Stun<&mut [u8]>) {
-				match self {
-					Self::Icmp {
-						typ,
-						code,
-						error_data,
-					} => {
-						msg.append::<ICMP, _>(&(typ, code, error_data)).unwrap();
-					}
-					Self::Data {
-						len,
-						padding,
-						stun_length,
-					} => {
-						// Zero out the padding bytes:
-						msg.buffer[48 + len..][..padding].fill(0);
-
-						// Write the length of the Data attribute and update the length of the STUN packet
-						msg.buffer[44..46].copy_from_slice(&DATA.to_be_bytes());
-						msg.buffer[46..48].copy_from_slice(&u16::to_be_bytes(len as u16));
-						msg.set_length(stun_length);
-					}
-				}
-			}
-		}
-
-		let (receiver, sender, append) = match next_header {
-			IpProtocol::Icmpv6 => {
-				let Ok(icmp) = Icmpv6Packet::new_checked(&buffer[40..length]) else {
-					return None;
+				// STUN (xor_peer + data header - udp header length + padding + udp packet length)
+				let Some(stun_length) = (24 + 4 - 8 + padding).checked_add(udp.length.get()) else {
+					return None
 				};
-				let Ok(_) = Icmpv6Repr::parse(&src_addr, &dst_addr, &icmp, &checksum_caps) else {
-					return None;
-				};
-				let typ = icmp.msg_type().into();
-				let code = icmp.msg_code();
-				let error_data = buffer[44..48].try_into().unwrap();
+				let data_len = udp.length.get() - 8;
+				let sender = SocketAddr::new(ip.src.into(), udp.src_port.get());
+				let receiver = SocketAddr::new(ip.dst.into(), udp.dst_port.get());
 
-				// TODO: For Destination unreachable packets, look at the inner UDP packet for ports?
-				(
-					SocketAddr::new(dst_addr.into(), 4666),
-					SocketAddr::new(src_addr.into(), 4666),
-					Append::Icmp {
-						typ,
-						code,
-						error_data,
-					},
-				)
-			}
-			IpProtocol::Udp => {
-				let Ok(udp) = UdpPacket::new_checked(&buffer[40..length]) else {
-					return None;
-				};
-				let Ok(UdpRepr { src_port, dst_port }) =
-					UdpRepr::parse(&udp, &src_addr.into(), &dst_addr.into(), &checksum_caps)
-				else {
-					return None;
-				};
+				// Create a TURN message from this network message:
+				let mut msg = Stun { buffer };
+				msg.set_class(Class::Indication);
+				msg.set_method(Method::Data);
+				msg.set_length(0);
+				msg.set_cookie(MAGIC_COOKIE);
+				rng().fill_bytes(msg.set_txid());
+				msg.append::<XOR_PEER_ADDRESS, _>(&sender).unwrap();
 
-				// UDP -> TURN Data Indication
-				let receiver = SocketAddr::new(dst_addr.into(), dst_port);
-				let sender = SocketAddr::new(src_addr.into(), src_port);
+				// Fill a STUN DATA attribute
+				let data = StunAttrHeader::mut_from_bytes(&mut msg.buffer[44..48]).unwrap();
+				data.typ.set(DATA);
+				data.length.set(data_len);
+				// Zero out the padding bytes:
+				msg.buffer[48 + data_len as usize..][..padding as usize].fill(0);
 
-				let len = udp.payload().len();
-				let padding = (4 - len % 4) % 4;
-				let Ok(stun_length) = u16::try_from(28 + len + padding) else {
-					return None;
-				};
+				msg.set_length(stun_length);
 
-				(
+				Some(Action::SendTo {
+					length: msg.len(),
 					receiver,
-					sender,
-					Append::Data {
-						len,
-						padding,
-						stun_length,
-					},
-				)
+				})
 			}
-			_ => return None,
-		};
-
-		// Create a TURN message from this network message:
-		let mut msg = Stun { buffer };
-		msg.set_class(Class::Indication);
-		msg.set_method(Method::Data);
-		msg.set_length(0);
-		msg.set_cookie(MAGIC_COOKIE);
-		rng().fill_bytes(msg.set_txid());
-		msg.append::<XOR_PEER_ADDRESS, _>(&sender).unwrap();
-		append.append(&mut msg);
-
-		Some(Action::SendTo {
-			length: msg.len(),
-			receiver,
-		})
+			// TODO: I don't know any WebRTC's that utilize ICMP indications, but I could generate them here for path mtu discovering perhaps
+			_ => None
+		}
 	}
 }
