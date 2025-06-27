@@ -33,7 +33,7 @@ struct Args {
 	#[arg(long, short, default_value = "cert.pem")]
 	cert_file: String,
 
-	#[arg(long, short, default_value = "::1")]
+	#[arg(long, short, default_value = "fd00:1::")]
 	endpoint: String,
 
 	#[arg(long, short)]
@@ -44,12 +44,13 @@ struct Wrapper {
 	send_from: ([u8; 16], u16),
 	send_to: ([u8; 16], u16),
 	tun: Rc<Tun>,
-	buffer: Rc<RefCell<[u8; 65536]>>,
+	recv_buffer: Rc<RefCell<[u8; 65536]>>,
+	send_buffer: Rc<RefCell<[u8; 65536]>>,
 }
 impl Read for Wrapper {
 	fn read(&mut self, buf: &mut [u8]) -> Result<usize, Error> {
 		let would_block = Err(Error::new(ErrorKind::WouldBlock, ""));
-		let mut buffer = self.buffer.borrow_mut();
+		let Ok(mut buffer) = self.recv_buffer.try_borrow_mut() else { return  would_block };
 		let (ip, rest) = Ip6Header::mut_from_prefix(buffer.as_mut_slice()).unwrap();
 		if (ip.flags.get() >> 28) != 6 { return would_block }
 		if ip.next_header != ip_proto::UDP { return would_block }
@@ -66,7 +67,7 @@ impl Read for Wrapper {
 impl Write for Wrapper {
 	fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
 	fn write(&mut self, buf: &[u8]) -> Result<usize, Error> {
-		let mut buffer = self.buffer.borrow_mut();
+		let mut buffer = self.send_buffer.borrow_mut();
 		let (ip, rest) = Ip6Header::mut_from_prefix(buffer.as_mut_slice()).unwrap();
 		let (udp, rest) = UdpHeader::mut_from_prefix(rest).unwrap();
 		if rest.len() < buf.len() { return Err(Error::other("Packet too large")) }
@@ -85,11 +86,7 @@ impl Write for Wrapper {
 		rest[..buf.len()].copy_from_slice(buf);
 
 		let tot_len = ip.len();
-		let res = self.tun.send(&buffer[..tot_len]);
-
-		// Zero out the ip6 portion of the buffer because we don't want to accidentally read back that data we just wrote.  Evan you dumb fuck.
-		buffer[0..40].fill(0);
-		res?;
+		self.tun.send(&buffer[..tot_len])?;
 
 		Ok(buf.len())
 	}
@@ -143,13 +140,14 @@ fn main() -> Result<Never> {
 	});
 
 	// TODO: Shrink buffers, this is ridiculous
-	let shared_buffer = Rc::new(RefCell::new([0; 65536]));
+	let recv_buffer = Rc::new(RefCell::new([0; 65536]));
+	let send_buffer = Rc::new(RefCell::new([0; 65536]));
 	let mut sctp_buffer = [0; 65536];
 	let mut connections = BTreeMap::new();
 
 	loop {
 		let (in_ip, src_port, dst_port) = {
-			let mut buffer = shared_buffer.borrow_mut();
+			let mut buffer = recv_buffer.borrow_mut();
 			let Ok(length) = tun.recv( buffer.as_mut_slice()) else { continue };
 			let (ip, rest) = Ip6Header::ref_from_prefix(buffer.as_slice()).unwrap();
 			if (ip.flags.get() >> 28) != 6 { continue }
@@ -174,6 +172,7 @@ fn main() -> Result<Never> {
 		let entry = connections.entry(in_ip.dst);
 		let ctx = match entry {
 			Entry::Vacant(_) if in_ip.next_header != ip_proto::UDP => {
+				// TODO: ICMP error?
 				// Don't create a DTLS context if we're receiving SCTP traffic
 				continue;
 			}
@@ -181,7 +180,8 @@ fn main() -> Result<Never> {
 				let wrap = Wrapper {
 					send_from: (in_ip.dst, dst_port),
 					send_to: (in_ip.src, src_port),
-					buffer: shared_buffer.clone(),
+					recv_buffer: recv_buffer.clone(),
+					send_buffer: send_buffer.clone(),
 					tun: tun.clone(),
 				};
 				let mut ssl = Ssl::new(acceptor.context())?;
@@ -193,31 +193,49 @@ fn main() -> Result<Never> {
 			Entry::Occupied(o) => o.into_mut()
 		};
 
-		// Perform as many ssl reads as needed to consume the packet (one packet can contain multiple DTLS data frames)
+		// Retry the ssl operation until it would block, fails, or succeeds if it's SCTP
 		loop {
-			let (out_ip, rest) = Ip6Header::mut_from_prefix(&mut sctp_buffer).unwrap();// TODO: If we end up switching to UDP encapsulated SCTP, then distinguishing between DTLS UDP traffic and SCTP UDP traffic might be annoying.  I generally disapprove of muxing, the whole point of these programs is to not do that when possible.  Probably the right thing to do in that case would be to use two different TUN interfaces: one for DTLS and one for SCTP so that routing rules can
-			// let (out_udp, rest) = UdpHeader::mut_from_prefix(rest).unwrap();
+			match in_ip.next_header {
+				// Decrypt the DTLS packet
+				ip_proto::UDP => {
+					let (out_ip, rest) = Ip6Header::mut_from_prefix(sctp_buffer.as_mut_slice()).unwrap();// TODO: If we end up switching to UDP encapsulated SCTP, then distinguishing between DTLS UDP traffic and SCTP UDP traffic might be annoying.  I generally disapprove of muxing, the whole point of these programs is to not do that when possible.  Probably the right thing to do in that case would be to use two different TUN interfaces: one for DTLS and one for SCTP so that routing rules can
+					// let (out_udp, rest) = UdpHeader::mut_from_prefix(rest).unwrap();
 
-			match ctx.read(rest) {
-				Err(e) if e.kind() == ErrorKind::WouldBlock => break,
-				Ok(length) if length > 0 => {
-					// Update the send_to address using the last seen src ip and port
-					ctx.get_mut().send_to = (in_ip.src, src_port);
+					match ctx.read(rest) {
+						Err(e) if e.kind() == ErrorKind::WouldBlock => break,
+						Ok(length) if length > 0 => {
+							// Update the send_to address using the last seen src ip and port
+							ctx.get_mut().send_to = (in_ip.src, src_port);
 
-					let length = u16::try_from(length).unwrap();
-					out_ip.flags.set(6 << 28);
-					out_ip.payload_length.set(length);
-					out_ip.next_header = ip_proto::SCTP;
-					out_ip.hop_limit = 5;
-					out_ip.src = in_ip.dst;
-					out_ip.dst = endpoint.octets();
-					let tot_len = out_ip.len();
-					tun.send(&sctp_buffer[..tot_len])?;
+							let length = u16::try_from(length).unwrap();
+							out_ip.flags.set(6 << 28);
+							out_ip.payload_length.set(length);
+							out_ip.next_header = ip_proto::SCTP;
+							out_ip.hop_limit = 5;
+							out_ip.src = in_ip.dst;
+							out_ip.dst = endpoint.octets();
+							let tot_len = out_ip.len();
+							tun.send(&sctp_buffer[..tot_len])?;
+						}
+						_ => {
+							connections.remove(&in_ip.dst);
+							break
+						}
+					}
 				}
-				_ => {
-					connections.remove(&in_ip.dst);
-					break
+				// Encrypt the SCTP packet
+				ip_proto::SCTP => {
+					match ctx.write(&recv_buffer.borrow()[40..in_ip.len()]) {
+						Err(e) if e.kind() == ErrorKind::WouldBlock => break,
+						Ok(length) if length > 0 => break,
+						_ => {
+							connections.remove(&in_ip.dst);
+							break
+						}
+					}
 				}
+				// We've filtered to UDP or SCTP already
+				_ => unreachable!(),
 			}
 		}
 	}
