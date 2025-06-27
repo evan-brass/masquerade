@@ -357,7 +357,7 @@ impl Server {
 			ip_proto::UDP if ip.payload_length.get() > 8 => {
 				let (udp, _) = UdpHeader::mut_from_prefix(rest).unwrap();
 				if udp.length != ip.payload_length { return None }
-				let padding = udp.length.get() % 4;
+				let padding = (4 - udp.length.get() % 4) % 4;
 
 				// STUN (xor_peer + data header - udp header length + padding + udp packet length)
 				let Some(stun_length) = (24 + 4 - 8 + padding).checked_add(udp.length.get()) else {
