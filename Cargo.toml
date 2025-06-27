@@ -1,3 +1,3 @@
 [workspace]
 resolver = "2"
-members = ["dtls-proxy", "sctp", "stun", "turn-gateway"]
+members = ["dtls-proxy", "stun", "turn-gateway"]
