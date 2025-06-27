@@ -1,0 +1,6 @@
+[NetDev]
+Name=relay-isolation
+Kind=vrf
+
+[VRF]
+Table=1

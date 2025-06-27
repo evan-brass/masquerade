@@ -1,11 +1,14 @@
 [Unit]
 Description=Pseudo-VPN gateway speaking the TURN wire format
-After=relay-isolation.service
+After=network-online.target
+User=masquerade
+Group=masquerade
 
 [Install]
 WantedBy=multi-user.target
 
 [Service]
 Restart=always
+Environmnet=RUST_BACKTRACE="full"
 Environment=RUST_LOG="trace"
 ExecStart=/usr/sbin/turn-gateway -i turn

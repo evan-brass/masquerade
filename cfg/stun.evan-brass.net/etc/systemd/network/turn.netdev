@@ -1,0 +1,7 @@
+[NetDev]
+Name=turn
+Kind=tun
+
+[Tun]
+User=masquerade
+Group=masquerade

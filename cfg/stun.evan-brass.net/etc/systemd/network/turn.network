@@ -1,0 +1,20 @@
+[Match]
+Name=turn
+
+[Link]
+# RequiredForOnline=no
+# ActivationPolicy=always-up
+
+[Network]
+VRF=relay-isolation
+ConfigureWithoutCarrier=yes
+
+# TURN UDP
+[Route]
+Destination=::/0
+Table=1
+
+# TURN TCP for Site 1 (us)
+[Route]
+Destination=fd01:1::/64
+Table=1
