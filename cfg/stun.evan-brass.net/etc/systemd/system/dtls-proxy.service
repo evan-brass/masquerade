@@ -1,5 +1,5 @@
 [Unit]
-Description=Pseudo-VPN gateway speaking the TURN wire format
+Description=DTLS proxy
 After=network-online.target
 
 [Install]
@@ -11,4 +11,4 @@ Group=masquerade
 Restart=always
 Environmnet=RUST_BACKTRACE="full"
 Environment=RUST_LOG="trace"
-ExecStart=/usr/sbin/turn-gateway -i turn
+ExecStart=/usr/sbin/dtls-proxy -i dtls -c /var/opt/cert.pem

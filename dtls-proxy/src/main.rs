@@ -1,31 +1,27 @@
-use std::{cell::RefCell, collections::{btree_map::Entry, BTreeMap}, io::{ErrorKind, Read, Write}, net::{Ipv6Addr, /* SocketAddrV6 */}, str::FromStr};
-use eyre::Result;
-// use openssl_sys::SRTP_PROTECTION_PROFILE;
-use std::io::Error;
+use std::cell::RefCell;
+use std::collections::btree_map::Entry;
+use std::collections::BTreeMap;
+use std::net::Ipv6Addr;
 use std::rc::Rc;
-// use sctp::{Chunk, Data, Init, Param, Sack, Sctp};
-// use rand::random;
-
-use clap::Parser;
-// use openssl::ssl::{Ssl, SslAcceptor, SslFiletype, SslMethod, SslStream, SslVerifyMode};
-// use smoltcp::{phy::ChecksumCapabilities, wire::{IpProtocol, Ipv6Packet, Ipv6Repr, UdpPacket, UdpRepr}};
-use tappers::{Interface, Tun};
-// use tracing::{debug, trace};
-
-use openssl::ssl::SslStream;
-use openssl::{
-	// error::ErrorStack,
-	// ex_data::Index,
-	// hash::MessageDigest,
-	pkey::PKey,
-	// sign::{Signer, Verifier},
-	ssl::{Ssl, SslAcceptor, SslMethod, /* SslVerifyMode */},
-	x509::X509,
-};
-use tracing_subscriber::EnvFilter;
-use wire::{ip_proto, FromBytes, Ip6Header, SctpHeader, UdpHeader};
-
+use std::str::FromStr;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+use eyre::Result;
 type Never = core::convert::Infallible;
+use clap::Parser;
+use mbedtls::error::codes;
+use mbedtls::error::HiError::SslWantRead;
+use mbedtls::pk::Pk;
+use mbedtls::rng::{CtrDrbg, OsEntropy};
+use mbedtls::ssl::config::{Endpoint, Preset, Transport};
+use mbedtls::ssl::context::Timer;
+use mbedtls::ssl::{Config, Context, CookieContext, Io};
+use mbedtls::x509::Certificate;
+use tappers::Tun;
+use tracing_subscriber::EnvFilter;
+use tracing::trace;
+use wire::{ip_proto, FromBytes, Ip6Header, SctpHeader, UdpHeader};
+use tappers::Interface;
 
 #[derive(Parser)]
 #[command(version, about)]
@@ -41,17 +37,26 @@ struct Args {
 }
 
 struct Wrapper {
+	// Random Destination ip
 	send_from: ([u8; 16], u16),
+	// Last seen source ip (update with the sender of fresh decrypted data)
 	send_to: ([u8; 16], u16),
-	tun: Rc<Tun>,
-	recv_buffer: Rc<RefCell<[u8; 65536]>>,
-	send_buffer: Rc<RefCell<[u8; 65536]>>,
+
+	// Handle to the network for send
+	network: Rc<Tun>,
+
+	// Shared receive and send buffers
+	recv_buffer: Rc<RefCell<[u8]>>,
+	send_buffer: Rc<RefCell<[u8]>>,
+
+	// Timestamp to cleanup old connections
+	last_update: Instant,
 }
-impl Read for Wrapper {
-	fn read(&mut self, buf: &mut [u8]) -> Result<usize, Error> {
-		let would_block = Err(Error::new(ErrorKind::WouldBlock, ""));
+impl Io for Wrapper {
+	fn recv(&mut self, buf: &mut [u8]) -> mbedtls::Result<usize> {
+		let would_block = Err(mbedtls::Error::HighLevel(codes::SslWantRead));
 		let Ok(mut buffer) = self.recv_buffer.try_borrow_mut() else { return  would_block };
-		let (ip, rest) = Ip6Header::mut_from_prefix(buffer.as_mut_slice()).unwrap();
+		let (ip, rest) = Ip6Header::mut_from_prefix(&mut buffer).unwrap();
 		if (ip.flags.get() >> 28) != 6 { return would_block }
 		if ip.next_header != ip_proto::UDP { return would_block }
 		if ip.payload_length.get() <= 8 { return would_block }
@@ -63,15 +68,12 @@ impl Read for Wrapper {
 		buf[..len].copy_from_slice(&rest[8..][..len]);
 		Ok(len)
 	}
-}
-impl Write for Wrapper {
-	fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
-	fn write(&mut self, buf: &[u8]) -> Result<usize, Error> {
+	fn send(&mut self, buf: &[u8]) -> mbedtls::Result<usize> {
 		let mut buffer = self.send_buffer.borrow_mut();
-		let (ip, rest) = Ip6Header::mut_from_prefix(buffer.as_mut_slice()).unwrap();
+		let (ip, rest) = Ip6Header::mut_from_prefix(&mut buffer).unwrap();
 		let (udp, rest) = UdpHeader::mut_from_prefix(rest).unwrap();
-		if rest.len() < buf.len() { return Err(Error::other("Packet too large")) }
-		let Some(length) = u16::try_from(buf.len()).ok().and_then(|l| l.checked_add(8)) else { return Err(Error::other("Packet too large")) };
+		if rest.len() < buf.len() { return Err(mbedtls::Error::HighLevel(codes::SslBufferTooSmall)) }
+		let Some(length) = u16::try_from(buf.len()).ok().and_then(|l| l.checked_add(8)) else { return Err(mbedtls::Error::HighLevel(codes::SslBufferTooSmall)) };
 
 		ip.flags.set(6 << 28);
 		ip.payload_length.set(length);
@@ -86,7 +88,8 @@ impl Write for Wrapper {
 		rest[..buf.len()].copy_from_slice(buf);
 
 		let tot_len = ip.len();
-		self.tun.send(&buffer[..tot_len])?;
+		self.network.send(&buffer[..tot_len])
+			.map_err(|_|mbedtls::Error::Other(-15))?;
 
 		Ok(buf.len())
 	}
@@ -102,54 +105,73 @@ fn main() -> Result<Never> {
 	let args = Args::try_parse()?;
 
 	// Parse the destination ip address
-	let endpoint = Ipv6Addr::from_str(&args.endpoint)?;
-
-	// Configure our DTLS server
-	let pem = std::fs::read(args.cert_file)?;
-	let certificate = X509::from_pem(&pem)?;
-	let pkey = PKey::private_key_from_pem(&pem)?;
-
-	// Figure out what our ufrag is
-	// let mut fingerprint = certificate.digest(MessageDigest::sha256())?;
-	// let ice_ufrag = to_base62(&mut fingerprint);
-	// debug!(ice_ufrag, "Hosted");
-
-	// Configure a DTLS server
-	let mut acceptor = SslAcceptor::mozilla_modern_v5(SslMethod::dtls())?;
-	acceptor.set_certificate(&certificate)?;
-	acceptor.set_private_key(&pkey)?;
-	acceptor.check_private_key()?;
-	// acceptor.add_client_ca(&certificate)?;
-	// let mode = SslVerifyMode::PEER | SslVerifyMode::FAIL_IF_NO_PEER_CERT;
-	// acceptor.set_verify_callback(mode, |_preverify, _cert_store| {
-	// 	// TODO: Check certificate expiration?
-	// 	true
-	// });
-
-	// Get a slot to hold the socketaddress so that we can generate and check dtls cookies:
-	// let (addr_index, generate, verify) = dtls_cookies()?;
-	// acceptor.set_cookie_generate_cb(generate);
-	// acceptor.set_cookie_verify_cb(verify);
-	let acceptor = acceptor.build();
+	let endpoint = Ipv6Addr::from_str(&args.endpoint)?.octets();
 
 	// Setup the TUN interface
-	let tun = Rc::new(if let Some(if_name) = args.if_name {
+	let network = Rc::new(if let Some(if_name) = args.if_name {
 		Tun::new_named(Interface::new(if_name)?)?
 	} else {
 		Tun::new()?
 	});
 
-	// TODO: Shrink buffers, this is ridiculous
-	let recv_buffer = Rc::new(RefCell::new([0; 65536]));
-	let send_buffer = Rc::new(RefCell::new([0; 65536]));
-	let mut sctp_buffer = [0; 65536];
+	// Enable mbedtls logging
+	unsafe { mbedtls::set_global_debug_threshold(2); }
+
+	// Setup random
+	let entropy = Arc::new(OsEntropy::new());
+	let rng = Arc::new(CtrDrbg::new(entropy, None)?);
+
+	// Configure our DTLS server
+	let mut config = Config::new(Endpoint::Server, Transport::Datagram, Preset::Default);
+	config.set_dbg_callback(|level, file, line, message| {
+		trace!("MBEDTLS({level}) {file}:{line} {message}");
+	});
+	config.set_rng(rng.clone());
+	// TODO: Peer certificate verify
+
+	// Load our certificate file
+	let mut pem = std::fs::read(args.cert_file)?; pem.push(0); // Null terminate the PEM as required by mbedtls
+	let cert = Arc::new(Certificate::from_pem_multiple(&pem)?);
+	let key = Arc::new(Pk::from_private_key(&pem, None)?);
+	config.push_cert(cert, key)?;
+
+	// Enable DTLS cookies
+	let cookies = CookieContext::new(rng)?;
+	config.set_dtls_cookies(Arc::new(cookies));
+
+	let config = Arc::new(config);
+
+	// Buffers
+	const BUFFER_LENGTH: usize = 4096;
+	let recv_buffer = Rc::new(RefCell::new([0; BUFFER_LENGTH]));
+	let send_buffer = Rc::new(RefCell::new([0; BUFFER_LENGTH]));
+	let mut decrypted = [0; BUFFER_LENGTH];
+
+	// Connection state
 	let mut connections = BTreeMap::new();
+	// TODO: Keep a map from (src ip, src port) -> dst ip so that we limit each src socket addr to 1 DTLS connection.
+
+	// Cleanup state
+	let timeout = Duration::from_secs(60 * 2);
+	let cleanup = Duration::from_secs(30);
+	let mut last_cleanup = Instant::now();
 
 	loop {
+		// Periodically Cleanup the connections
+		if last_cleanup.elapsed() > cleanup {
+			connections.retain(|_, v: &mut Context<Wrapper>| {
+				let Some(Wrapper { last_update, .. }) = v.io() else { unreachable!() };
+				last_update.elapsed() < timeout
+			});
+			last_cleanup = Instant::now();
+		}
+
+		// Read a packet from the network interface
 		let (in_ip, src_port, dst_port) = {
 			let mut buffer = recv_buffer.borrow_mut();
-			let Ok(length) = tun.recv( buffer.as_mut_slice()) else { continue };
+			let Ok(length) = network.recv( buffer.as_mut_slice()) else { continue };
 			let (ip, rest) = Ip6Header::ref_from_prefix(buffer.as_slice()).unwrap();
+			trace!(?ip, "TUN PACKET");
 			if (ip.flags.get() >> 28) != 6 { continue }
 			if ip.len() != length { continue }
 
@@ -182,12 +204,22 @@ fn main() -> Result<Never> {
 					send_to: (in_ip.src, src_port),
 					recv_buffer: recv_buffer.clone(),
 					send_buffer: send_buffer.clone(),
-					tun: tun.clone(),
+					network: network.clone(),
+					last_update: Instant::now(),
 				};
-				let mut ssl = Ssl::new(acceptor.context())?;
-				ssl.set_accept_state();
-				let Ok(_) = ssl.set_mtu(2000) else { continue };
-				let ssl = SslStream::new(ssl, wrap)?;
+				let mut ssl = Context::new(config.clone());
+				ssl.set_timer_callback(Box::new(Timer::new()));
+				// Set the *client id* which is really just input to do DTLS cookies.
+				ssl.set_client_transport_id_once(&in_ip.dst);
+				let res = ssl.establish(wrap, None);
+				trace!(?res, "ESTABLISH");
+				match res {
+					Ok(()) => {}
+					Err(e) if e.high_level() == Some(SslWantRead) => {}
+					// Don't insert the new ssl unless we successfully establish or want more recv data
+					// TODO: This probably isn't correct, what if we receive a non DTLS packet - that would mean there isn'
+					_ => continue
+				}
 				v.insert(ssl)
 			}
 			Entry::Occupied(o) => o.into_mut()
@@ -198,14 +230,18 @@ fn main() -> Result<Never> {
 			match in_ip.next_header {
 				// Decrypt the DTLS packet
 				ip_proto::UDP => {
-					let (out_ip, rest) = Ip6Header::mut_from_prefix(sctp_buffer.as_mut_slice()).unwrap();// TODO: If we end up switching to UDP encapsulated SCTP, then distinguishing between DTLS UDP traffic and SCTP UDP traffic might be annoying.  I generally disapprove of muxing, the whole point of these programs is to not do that when possible.  Probably the right thing to do in that case would be to use two different TUN interfaces: one for DTLS and one for SCTP so that routing rules can
-					// let (out_udp, rest) = UdpHeader::mut_from_prefix(rest).unwrap();
+					let (out_ip, rest) = Ip6Header::mut_from_prefix(decrypted.as_mut_slice()).unwrap();
 
-					match ctx.read(rest) {
-						Err(e) if e.kind() == ErrorKind::WouldBlock => break,
+					let res = ctx.recv(rest);
+					trace!(?res, "SCTP DECRYPT");
+					match res {
+						Err(e) if e.high_level() == Some(codes::SslWantRead) => break,
 						Ok(length) if length > 0 => {
 							// Update the send_to address using the last seen src ip and port
-							ctx.get_mut().send_to = (in_ip.src, src_port);
+							let Wrapper { last_update, send_to, ..} = ctx.io_mut().unwrap();
+							// TODO: handle src tracking to limit src ip+port to a single dtls connection
+							*last_update = Instant::now();
+							*send_to = (in_ip.src, src_port);
 
 							let length = u16::try_from(length).unwrap();
 							out_ip.flags.set(6 << 28);
@@ -213,9 +249,9 @@ fn main() -> Result<Never> {
 							out_ip.next_header = ip_proto::SCTP;
 							out_ip.hop_limit = 5;
 							out_ip.src = in_ip.dst;
-							out_ip.dst = endpoint.octets();
+							out_ip.dst = endpoint;
 							let tot_len = out_ip.len();
-							tun.send(&sctp_buffer[..tot_len])?;
+							network.send(&decrypted[..tot_len])?;
 						}
 						_ => {
 							connections.remove(&in_ip.dst);
@@ -223,10 +259,15 @@ fn main() -> Result<Never> {
 						}
 					}
 				}
-				// Encrypt the SCTP packet
+				// Encrypt the SCTP packet (if it came from endpoint)
 				ip_proto::SCTP => {
-					match ctx.write(&recv_buffer.borrow()[40..in_ip.len()]) {
-						Err(e) if e.kind() == ErrorKind::WouldBlock => break,
+					// Drop packets if they didn't originate from the endpoint we're relaying for
+					if in_ip.src != endpoint { continue }
+
+					let res = ctx.send(&recv_buffer.borrow()[40..in_ip.len()]);
+					trace!(?res, "SCTP ENCRYPT");
+					match res {
+						Err(e) if e.high_level() == Some(codes::SslWantRead) => break,
 						Ok(length) if length > 0 => break,
 						_ => {
 							connections.remove(&in_ip.dst);

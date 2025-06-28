@@ -6,9 +6,14 @@ Name=relay-isolation
 ActivationPolicy=always-up
 
 [Network]
+Address=fd00:1::/16
 
 # Forbid IPv4
 [Route]
 Destination=0.0.0.0/0
 Type=blackhole
 Table=1
+
+# Add routes for relay services into the main table (This is really just so that Kernel generated SCTP Aborts can find their way back into the VRF as expected.)
+[Route]
+Destination=fd00::/8

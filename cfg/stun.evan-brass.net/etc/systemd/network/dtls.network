@@ -1,5 +1,5 @@
 [Match]
-Name=turn
+Name=dtls
 
 [Link]
 # RequiredForOnline=no
@@ -9,10 +9,6 @@ Name=turn
 VRF=relay-isolation
 ConfigureWithoutCarrier=yes
 
-# TURN UDP
+# DTLS proxy
 [Route]
-Destination=::/0
-
-# TURN TCP for Site 1 (us)
-[Route]
-Destination=fd01:1::/64
+Destination=fd02::/16

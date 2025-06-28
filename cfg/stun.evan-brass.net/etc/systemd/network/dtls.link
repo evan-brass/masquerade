@@ -1,0 +1,6 @@
+[Match]
+OriginalName=dtls
+
+[Link]
+ReceiveChecksumOffload=yes
+TransmitChecksumOffload=yes

@@ -1,7 +1,10 @@
 [Unit]
 Description=Capture packets
 
+[Install]
+WantedBy=multi-user.target
+
 [Service]
-Restart=Always
-ExecStart=tcpdump -i any -w /var/tmp/trace -W 10 -G 21600 -C 10 -K not tcp port 22
+Restart=always
+ExecStart=tcpdump -i any -w /var/tmp/trace -G 21600 -K not tcp port 22
 

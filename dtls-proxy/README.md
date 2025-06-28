@@ -1,0 +1,3 @@
+A DTLS proxy that binds to a TUN interface and tracks connections using the destination ip instead of source ip+port.  Senders pick a random dst ip+port within whichever range is routed to that interface.  This enables sender mobility without requiring DTLS CID support from clients.  This presumably only works in private network situations where enough ip space can be dedicated to this usage.
+
+The decrypted data is emit on this same network interface as IPv6 packets from dst ip to a configurable endpoint ip with a next header (protocol number) of SCTP.  Similarly, SCTP packets received are encrypted and relayed if a DTLS context with the dst ip exists.

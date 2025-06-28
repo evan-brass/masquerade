@@ -4,5 +4,5 @@
 * Cross-compile executables and upload them
 * Upload systemd config files
 * chown and chgrp everything to root
-* Copy executables to /usr/sbin and config files to either their destinations
+* Copy executables to /usr/sbin and config files to their destinations
 * Reboot and check systemctl to make sure that everything is online

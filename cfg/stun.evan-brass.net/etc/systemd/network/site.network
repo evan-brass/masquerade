@@ -1,6 +1,0 @@
-[Match]
-Name=site
-
-[Network]
-VRF=relay-isolation
-Address=fd00:1::/32
