@@ -1,0 +1,11 @@
+[package]
+name = "sctp"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+nix = { git = "https://github.com/evan-brass/nix.git", features = ["net", "socket", "uio"] }
+zerocopy = { version = "0.8.26", features = ["derive"] }
+
+[rust-analyzer.checkOnSave]
+target = "aarch64-unknown-linux-gnu"
