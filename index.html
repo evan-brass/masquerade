@@ -7,10 +7,10 @@ const config = {
 		urls: [
 			// 'turn:stun.evan-brass.net',
 			// 'turn:stun.evan-brass.net?transport=tcp',
-			// 'turn:localhost',
-			// 'turn:localhost?transport=tcp',
-			'turn:rpi.local',
-			'turn:rpi.local?transport=tcp',
+			'turn:localhost',
+			'turn:localhost?transport=tcp',
+			// 'turn:rpi.local',
+			// 'turn:rpi.local?transport=tcp',
 		],
 		username: 'guest',
 		credential: 'password'
@@ -50,7 +50,7 @@ function log_everything(conn, label = conn.pid) {
 </script>
 
 <!-- Hosted -->
-<script type="module">
+<script type="_module">
 const h = new RTCPeerConnection(config);
 log_everything(h, 'h');
 await h.setRemoteDescription({type:'offer',sdp:`v=0
@@ -101,7 +101,7 @@ await a.setRemoteDescription(dissolve(b.localDescription));
 </script>
 
 <!-- Relay only a<->b -->
-<script type="_module">
+<script type="module">
 const a = new RTCPeerConnection(config);
 const b = new RTCPeerConnection(config);
 a.createDataChannel('');

@@ -7,8 +7,8 @@ WantedBy=multi-user.target
 
 [Service]
 User=masquerade
-Group=masquerade
 Restart=always
-Environmnet=RUST_BACKTRACE="full"
+Environment=RUST_BACKTRACE="full"
 Environment=RUST_LOG="trace"
-ExecStart=/usr/sbin/turn-gateway -i turn
+WorkingDirectory=/opt/masquerade
+ExecStart=/opt/masquerade/bin/turn-gateway -i turn

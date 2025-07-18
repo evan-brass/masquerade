@@ -2,12 +2,13 @@
 Name=dtls
 
 [Link]
-# RequiredForOnline=no
-# ActivationPolicy=always-up
+RequiredForOnline=no
+ActivationPolicy=up
 
 [Network]
-VRF=relay-isolation
 ConfigureWithoutCarrier=yes
+IgnoreCarrierLoss=yes
+VRF=relay-isolation
 
 # DTLS proxy
 [Route]

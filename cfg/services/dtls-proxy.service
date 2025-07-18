@@ -7,8 +7,9 @@ WantedBy=multi-user.target
 
 [Service]
 User=masquerade
-Group=masquerade
 Restart=always
-Environmnet=RUST_BACKTRACE="full"
+WorkingDirectory=/opt/masquerade
+Environment=RUST_BACKTRACE="full"
 Environment=RUST_LOG="trace"
-ExecStart=/usr/sbin/dtls-proxy -i dtls -c /var/opt/cert.pem
+
+ExecStart=/opt/masquerade/bin/dtls-proxy -i dtls
