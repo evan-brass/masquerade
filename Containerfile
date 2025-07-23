@@ -8,16 +8,18 @@ RUN apt update && apt install -y \
 	nginx \
 	clang \
 	cmake \
-	lksctp-tools
+	lksctp-tools \
+	tcpdump \
+	net-tools
 
 CMD ["systemd"]
 
 RUN systemctl mask systemd-remount-fs.service getty.target systemd-logind.service dev-hugepages.mount
 RUN systemctl enable systemd-networkd
 
-ADD cfg/masquerade.conf /usr/lib/sysusers.d/
+ADD cfg/user.conf /usr/lib/sysusers.d/masquerade.conf
 ADD cfg/network/* /etc/systemd/network/
-ADD cfg/forwarding.conf /etc/sysctl.d/
+ADD cfg/sysctl.conf /etc/sysctl.d/masquerade.conf
 ADD cfg/services/* /lib/systemd/system/
 ADD cfg/cert.pem /opt/masquerade/
 

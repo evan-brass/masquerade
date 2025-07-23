@@ -4,4 +4,3 @@ Kind=tun
 
 [Tun]
 User=masquerade
-Group=masquerade

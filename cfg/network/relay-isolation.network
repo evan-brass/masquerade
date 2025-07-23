@@ -8,7 +8,7 @@ ActivationPolicy=up
 [Network]
 ConfigureWithoutCarrier=yes
 IgnoreCarrierLoss=yes
-Address=fd00:1::/16
+Address=fd00:1::/8
 
 # Forbid IPv4
 [Route]
