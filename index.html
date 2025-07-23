@@ -37,9 +37,11 @@ function state(transitions) {
 </script>
 <script>
 // Log everything.
-function log_everything(conn, label = conn.pid) {
+function log_everything(conn, label = conn.pid, dc = conn.dc) {
 	const logger = (...args) => console.log(label, ...args);
-	// ['message', 'open', 'close'].forEach(e => conn.dc.addEventListener(e, logger));
+	if (dc) {
+		['message', 'open', 'close'].forEach(e => dc.addEventListener(e, logger));
+	}
 	['connectionState', 'iceConnectionState', 'iceGatheringState', 'signalingState'].forEach(p => {
 		conn.addEventListener(p.toLowerCase() + 'change', () => logger(p, conn[p]));
 	});
@@ -52,7 +54,7 @@ function log_everything(conn, label = conn.pid) {
 <!-- Hosted -->
 <script type="_module">
 const h = new RTCPeerConnection(config);
-log_everything(h, 'h');
+log_everything(h, 'h', h.createDataChannel(''));
 await h.setRemoteDescription({type:'offer',sdp:`v=0
 o=- 42 2 IN IP4 0.0.0.0
 s=-
@@ -61,7 +63,7 @@ a=BUNDLE dc
 a=ice-ufrag:dissolve
 a=ice-pwd:the/ice/password/constant
 a=ice-lite
-a=fingerprint:sha-256 2B:A6:E9:45:C9:92:70:C8:3D:AC:1C:BB:A1:55:C3:0B:C1:59:DA:06:AE:5A:3D:87:83:FB:52:B8:62:DF:00:C8
+a=fingerprint:sha-256 43:78:3C:C8:1E:A5:62:5E:A8:AA:7D:CF:04:9A:0C:A8:7D:8E:28:12:FA:EA:A0:47:42:98:36:3A:8C:68:C4:B0
 m=application 9 UDP/DTLS/SCTP webrtc-datachannel
 c=IN IP4 0.0.0.0
 a=mid:dc
@@ -104,9 +106,8 @@ await a.setRemoteDescription(dissolve(b.localDescription));
 <script type="module">
 const a = new RTCPeerConnection(config);
 const b = new RTCPeerConnection(config);
-a.createDataChannel('');
 
-log_everything(a, 'a');
+log_everything(a, 'a', a.createDataChannel(''));
 log_everything(b, 'b');
 
 await a.setLocalDescription();

@@ -1,0 +1,14 @@
+[package]
+name = "sctp-vpn"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+mio = { version = "1.0.4", features = ["os-ext", "os-poll"] }
+clap = { version = "4.5.40", features = ["derive"] }
+eyre = "0.6.12"
+tappers = "0.4.2"
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
+wire = { path = "../wire" }
+socket2 = { version = "0.6.0", features = ["all"] }
