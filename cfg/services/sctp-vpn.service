@@ -11,4 +11,4 @@ Restart=always
 Environment=RUST_BACKTRACE="full"
 Environment=RUST_LOG="trace"
 WorkingDirectory=/opt/masquerade
-ExecStart=/opt/masquerade/bin/sctp-vpn
+ExecStart=/opt/masquerade/bin/sctp-vpn -i sctp

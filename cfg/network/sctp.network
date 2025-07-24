@@ -1,0 +1,15 @@
+[Match]
+Name=sctp
+
+[Link]
+RequiredForOnline=no
+ActivationPolicy=up
+
+[Network]
+ConfigureWithoutCarrier=yes
+IgnoreCarrierLoss=yes
+VRF=relay-isolation
+
+# sctp-vpn allocated addresses
+[Route]
+Destination=fd04:1::/64

@@ -1,0 +1,6 @@
+[NetDev]
+Name=sctp
+Kind=tun
+
+[Tun]
+User=masquerade

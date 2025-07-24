@@ -12,3 +12,5 @@ tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
 wire = { path = "../wire" }
 socket2 = { version = "0.6.0", features = ["all"] }
+libc = "0.2.174"
+slab = "0.4.10"
