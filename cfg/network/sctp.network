@@ -1,10 +1,6 @@
 [Match]
 Name=sctp
 
-[Link]
-RequiredForOnline=no
-ActivationPolicy=up
-
 [Network]
 ConfigureWithoutCarrier=yes
 IgnoreCarrierLoss=yes

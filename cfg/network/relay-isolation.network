@@ -1,10 +1,6 @@
 [Match]
 Name=relay-isolation
 
-[Link]
-RequiredForOnline=no
-ActivationPolicy=up
-
 [Network]
 ConfigureWithoutCarrier=yes
 IgnoreCarrierLoss=yes

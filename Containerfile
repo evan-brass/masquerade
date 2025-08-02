@@ -2,20 +2,35 @@
 # For Podman on MacOS, go to Settings -> Resources -> Podman -> More options (⋮) -> Terminal -> `sudo echo "sctp" > /etc/modprobe.d/sctp.conf` then reboot.
 
 FROM rust
-RUN apt update && apt install -y \
-	systemd \
-	udev \
-	nginx \
-	clang \
-	cmake \
-	lksctp-tools \
-	tcpdump \
-	net-tools
 
-CMD ["systemd"]
+RUN apt update \
+	; apt install -y \
+		systemd \
+		udev \
+		nginx \
+		clang \
+		cmake \
+		lksctp-tools \
+		tcpdump \
+		net-tools \
+	; systemctl mask \
+		getty.target \
+		dev-hugepages.mount \
+		dev-mqueue.mount \
+		initrd-root-device.target \
+		initrd-root-fs.target \
+		systemd-random-seed.service \
+		integritysetup.target \
+		veritysetup.target \
+		cryptsetup.target \
+		time-set.target \
+		systemd-logind.service \
+	; systemctl enable \
+		systemd-networkd.service \
+	;
 
-RUN systemctl mask systemd-remount-fs.service getty.target systemd-logind.service dev-hugepages.mount
-RUN systemctl enable systemd-networkd
+ENV container yes
+CMD ["systemd", "--log-level=debug"]
 
 ADD cfg/user.conf /usr/lib/sysusers.d/masquerade.conf
 ADD cfg/network/* /etc/systemd/network/

@@ -9,6 +9,7 @@ const config = {
 		urls: [
 			'turn:stun.evan-brass.net',
 			'turn:stun.evan-brass.net?transport=tcp',
+			'turns:stun.evan-brass.net:443?transport=tcp',
 		],
 		username: 'guest',
 		credential: 'password'
@@ -30,4 +31,9 @@ await b.setRemoteDescription(a.localDescription);
 await b.setLocalDescription();
 while (b.iceGatheringState != 'complete') await new Promise(res => b.addEventListener('icegatheringstatechange', res, {once: true}));
 await a.setRemoteDescription(b.localDescription);
+```
+
+## How to run
+```
+podman build -t masquerade .; podman run --rm -p 3478:3478/udp -p 3478:3478/tcp --privileged masquerade
 ```

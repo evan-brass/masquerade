@@ -1,10 +1,6 @@
 [Match]
 Name=turn
 
-[Link]
-RequiredForOnline=no
-ActivationPolicy=up
-
 [Network]
 ConfigureWithoutCarrier=yes
 IgnoreCarrierLoss=yes
