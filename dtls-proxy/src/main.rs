@@ -1,7 +1,7 @@
 use std::cell::RefCell;
 use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
-use std::net::Ipv6Addr;
+use std::net::{Ipv6Addr, SocketAddrV6};
 use std::os::fd::AsRawFd;
 use std::rc::Rc;
 use std::str::FromStr;
@@ -32,8 +32,8 @@ struct Args {
 	#[arg(long, short, default_value = "cert.pem")]
 	cert_file: String,
 
-	#[arg(long, short, default_value = "fd00:1::")]
-	endpoint: String,
+	#[arg(long, short, default_value = "[fd00:1::]:5001")]
+	sctp: String,
 
 	#[arg(long, short)]
 	if_name: Option<String>,
@@ -44,19 +44,25 @@ struct IndexIp {
 	site: u16,
 	index: u64,
 }
-impl From<IndexIp> for [u8; 16] {
-	fn from(IndexIp { proto, site, index }: IndexIp) -> Self {
-		let mut octets = [0xfd, proto, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+impl From<&IndexIp> for Ipv6Addr {
+	fn from(IndexIp { proto, site, index }: &IndexIp) -> Self {
+		let mut octets = [0xfd, *proto, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
 		octets[2..4].copy_from_slice(&site.to_be_bytes());
 		octets[8..].copy_from_slice(&index.to_be_bytes());
-		octets
+		octets.into()
 	}
 }
-impl TryFrom<[u8; 16]> for IndexIp {
-	type Error = ();
-	fn try_from(octets: [u8; 16]) -> Result<Self, Self::Error> {
-		if octets[0] != 0xfd || octets[4..8] != [0, 0, 0, 0] {
-			return Err(())
+impl TryFrom<&Ipv6Addr> for IndexIp {
+	type Error = Ipv6Addr;
+	fn try_from(value: &Ipv6Addr) -> Result<Self, Self::Error> {
+		let octets = value.octets();
+		// The value must be within the private ip6 range of fd00::/8
+		if octets[0] != 0xfd {
+			return Err(*value)
+		}
+		// The value must be within the index range of fd{proto}:{site}::/64
+		if octets[4..8] != [0, 0, 0, 0] {
+			return Err(*value);
 		}
 		let proto = octets[1];
 		let site = u16::from_be_bytes(octets[2..4].try_into().unwrap());
@@ -67,9 +73,9 @@ impl TryFrom<[u8; 16]> for IndexIp {
 
 struct Wrapper {
 	// Random Destination ip
-	send_from: ([u8; 16], u16),
+	send_from: SocketAddrV6,
 	// Last seen source ip (update with the sender of fresh decrypted data)
-	send_to: ([u8; 16], u16),
+	send_to: SocketAddrV6,
 
 	// Handle to the network for send
 	network: Rc<Tun>,
@@ -108,10 +114,10 @@ impl Io for Wrapper {
 		ip.payload_length.set(length);
 		ip.next_header = ip_proto::UDP;
 		ip.hop_limit = 5;
-		ip.dst = self.send_to.0;
-		ip.src = self.send_from.0;
-		udp.dst_port.set(self.send_to.1);
-		udp.src_port.set(self.send_from.1);
+		ip.dst = self.send_to.ip().octets();
+		ip.src = self.send_from.ip().octets();
+		udp.dst_port.set(self.send_to.port());
+		udp.src_port.set(self.send_from.port());
 		udp.length.set(length);
 		udp.checksum.set(0);
 		rest[..buf.len()].copy_from_slice(buf);
@@ -140,7 +146,9 @@ fn main() -> Result<Never> {
 	let mut events = Events::with_capacity(128);
 
 	// Parse the destination ip address
-	let endpoint = Ipv6Addr::from_str(&args.endpoint)?.octets();
+	let sctp_addr = SocketAddrV6::from_str(&args.sctp)?;
+	// let IndexIp { site, .. } = IndexIp::try_from(sctp_addr.ip()).map_err(|ip| )?;
+	let endpoint = sctp_addr.ip().octets();
 
 	// Setup the TUN interface
 	let mut network = if let Some(if_name) = args.if_name {
@@ -234,7 +242,7 @@ fn main() -> Result<Never> {
 							(ip.clone(), src_port, dst_port)
 						};
 
-						let entry = connections.entry(in_ip.dst);
+						let entry = connections.entry(in_ip.dst.into());
 						let ctx = match entry {
 							Entry::Vacant(_) if in_ip.next_header != ip_proto::UDP => {
 								// TODO: ICMP error?
@@ -242,9 +250,11 @@ fn main() -> Result<Never> {
 								continue;
 							}
 							Entry::Vacant(v) => {
+								let send_from = SocketAddrV6::new(in_ip.dst.into(), dst_port, 0, 0);
+								let send_to = SocketAddrV6::new(in_ip.src.into(), src_port, 0, 0);
 								let wrap = Wrapper {
-									send_from: (in_ip.dst, dst_port),
-									send_to: (in_ip.src, src_port),
+									send_from,
+									send_to,
 									recv_buffer: recv_buffer.clone(),
 									send_buffer: send_buffer.clone(),
 									network: network.clone(),
@@ -275,6 +285,7 @@ fn main() -> Result<Never> {
 								ip_proto::UDP => {
 									let (out_ip, rest) = Ip6Header::mut_from_prefix(decrypted.as_mut_slice()).unwrap();
 
+
 									let res = ctx.recv(rest);
 									trace!(?res, "SCTP DECRYPT");
 									match res {
@@ -284,7 +295,7 @@ fn main() -> Result<Never> {
 											let Wrapper { last_update, send_to, ..} = ctx.io_mut().unwrap();
 											// TODO: handle src tracking to limit src ip+port to a single dtls connection
 											*last_update = Instant::now();
-											*send_to = (in_ip.src, src_port);
+											*send_to = SocketAddrV6::new(in_ip.src.into(), src_port, 0, 0);
 
 											let length = u16::try_from(length).unwrap();
 											out_ip.flags.set(6 << 28);
