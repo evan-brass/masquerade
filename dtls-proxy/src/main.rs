@@ -2,6 +2,7 @@ use std::cell::RefCell;
 use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
 use std::net::Ipv6Addr;
+use std::os::fd::AsRawFd;
 use std::rc::Rc;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -17,6 +18,8 @@ use mbedtls::ssl::config::{Endpoint, Preset, Transport};
 use mbedtls::ssl::context::Timer;
 use mbedtls::ssl::{Config, Context, CookieContext, Io};
 use mbedtls::x509::Certificate;
+use mio::unix::SourceFd;
+use mio::{Events, Interest, Poll, Token};
 use tappers::Tun;
 use tracing_subscriber::EnvFilter;
 use tracing::trace;
@@ -121,6 +124,8 @@ impl Io for Wrapper {
 	}
 }
 
+const NET: Token = Token(usize::MAX);
+
 fn main() -> Result<Never> {
 	// Enable logging
 	tracing_subscriber::fmt()
@@ -130,15 +135,22 @@ fn main() -> Result<Never> {
 	// Parse command line arguments
 	let args = Args::try_parse()?;
 
+	// Prep async
+	let mut poll = Poll::new()?;
+	let mut events = Events::with_capacity(128);
+
 	// Parse the destination ip address
 	let endpoint = Ipv6Addr::from_str(&args.endpoint)?.octets();
 
 	// Setup the TUN interface
-	let network = Rc::new(if let Some(if_name) = args.if_name {
+	let mut network = if let Some(if_name) = args.if_name {
 		Tun::new_named(Interface::new(if_name)?)?
 	} else {
 		Tun::new()?
-	});
+	};
+	network.set_nonblocking(true)?;
+	poll.registry().register(&mut SourceFd(&network.as_raw_fd()), NET, Interest::READABLE)?;
+	let network = Rc::new(network);
 
 	// Enable mbedtls logging
 	unsafe { mbedtls::set_global_debug_threshold(2); }
@@ -192,118 +204,129 @@ fn main() -> Result<Never> {
 			last_cleanup = Instant::now();
 		}
 
-		// Read a packet from the network interface
-		let (in_ip, src_port, dst_port) = {
-			let mut buffer = recv_buffer.borrow_mut();
-			let Ok(length) = network.recv( buffer.as_mut_slice()) else { continue };
-			let (ip, rest) = Ip6Header::ref_from_prefix(buffer.as_slice()).unwrap();
-			trace!(?ip, "TUN PACKET");
-			if (ip.flags.get() >> 28) != 6 { continue }
-			if ip.len() != length { continue }
+		// Handle Events
+		for e in events.into_iter() {
+			loop {
+				match e.token() {
+					NET => {
+						// Read a packet from the network interface
+						let (in_ip, src_port, dst_port) = {
+							let mut buffer = recv_buffer.borrow_mut();
+							let Ok(length) = network.recv( buffer.as_mut_slice()) else { break };
+							let (ip, rest) = Ip6Header::ref_from_prefix(buffer.as_slice()).unwrap();
+							trace!(?ip, "TUN PACKET");
+							if (ip.flags.get() >> 28) != 6 { continue }
+							if ip.len() != length { continue }
 
-			let (src_port, dst_port) = match (ip.next_header, ip.payload_length.get()) {
-				(ip_proto::UDP, 8..) => {
-					let (udp, _rest) = UdpHeader::ref_from_prefix(rest).unwrap();
-					if udp.length != ip.payload_length { continue }
-					(udp.src_port.get(), udp.dst_port.get())
-				}
-				(ip_proto::SCTP, 12..) => {
-					let (sctp, _rest) = SctpHeader::ref_from_prefix(rest).unwrap();
-					(sctp.src_port.get(), sctp.dst_port.get())
-				}
-				_ => continue,
-			};
+							let (src_port, dst_port) = match (ip.next_header, ip.payload_length.get()) {
+								(ip_proto::UDP, 8..) => {
+									let (udp, _rest) = UdpHeader::ref_from_prefix(rest).unwrap();
+									if udp.length != ip.payload_length { continue }
+									(udp.src_port.get(), udp.dst_port.get())
+								}
+								(ip_proto::SCTP, 12..) => {
+									let (sctp, _rest) = SctpHeader::ref_from_prefix(rest).unwrap();
+									(sctp.src_port.get(), sctp.dst_port.get())
+								}
+								_ => continue,
+							};
 
-			(ip.clone(), src_port, dst_port)
-		};
+							(ip.clone(), src_port, dst_port)
+						};
 
-		let entry = connections.entry(in_ip.dst);
-		let ctx = match entry {
-			Entry::Vacant(_) if in_ip.next_header != ip_proto::UDP => {
-				// TODO: ICMP error?
-				// Don't create a DTLS context if we're receiving SCTP traffic
-				continue;
-			}
-			Entry::Vacant(v) => {
-				let wrap = Wrapper {
-					send_from: (in_ip.dst, dst_port),
-					send_to: (in_ip.src, src_port),
-					recv_buffer: recv_buffer.clone(),
-					send_buffer: send_buffer.clone(),
-					network: network.clone(),
-					last_update: Instant::now(),
-				};
-				let mut ssl = Context::new(config.clone());
-				ssl.set_timer_callback(Box::new(Timer::new()));
-				// Set the *client id* which is really just input to do DTLS cookies.
-				ssl.set_client_transport_id_once(&in_ip.dst);
-				let res = ssl.establish(wrap, None);
-				trace!(?res, "ESTABLISH");
-				match res {
-					Ok(()) => {}
-					Err(e) if e.high_level() == Some(SslWantRead) => {}
-					// Don't insert the new ssl unless we successfully establish or want more recv data
-					// TODO: This probably isn't correct, what if we receive a non DTLS packet - that would mean there isn'
-					_ => continue
-				}
-				v.insert(ssl)
-			}
-			Entry::Occupied(o) => o.into_mut()
-		};
+						let entry = connections.entry(in_ip.dst);
+						let ctx = match entry {
+							Entry::Vacant(_) if in_ip.next_header != ip_proto::UDP => {
+								// TODO: ICMP error?
+								// Don't create a DTLS context if we're receiving SCTP traffic
+								continue;
+							}
+							Entry::Vacant(v) => {
+								let wrap = Wrapper {
+									send_from: (in_ip.dst, dst_port),
+									send_to: (in_ip.src, src_port),
+									recv_buffer: recv_buffer.clone(),
+									send_buffer: send_buffer.clone(),
+									network: network.clone(),
+									last_update: Instant::now(),
+								};
+								let mut ssl = Context::new(config.clone());
+								ssl.set_timer_callback(Box::new(Timer::new()));
+								// Set the *client id* which is really just input to do DTLS cookies.
+								ssl.set_client_transport_id_once(&in_ip.dst);
+								let res = ssl.establish(wrap, None);
+								trace!(?res, "ESTABLISH");
+								match res {
+									Ok(()) => {}
+									Err(e) if e.high_level() == Some(SslWantRead) => {}
+									// Don't insert the new ssl unless we successfully establish or want more recv data
+									// TODO: This probably isn't correct, what if we receive a non DTLS packet - that would mean there isn'
+									_ => continue
+								}
+								v.insert(ssl)
+							}
+							Entry::Occupied(o) => o.into_mut()
+						};
 
-		// Retry the ssl operation until it would block, fails, or succeeds if it's SCTP
-		loop {
-			match in_ip.next_header {
-				// Decrypt the DTLS packet
-				ip_proto::UDP => {
-					let (out_ip, rest) = Ip6Header::mut_from_prefix(decrypted.as_mut_slice()).unwrap();
+						// Retry the ssl operation until it would block, fails, or succeeds if it's SCTP
+						loop {
+							match in_ip.next_header {
+								// Decrypt the DTLS packet
+								ip_proto::UDP => {
+									let (out_ip, rest) = Ip6Header::mut_from_prefix(decrypted.as_mut_slice()).unwrap();
 
-					let res = ctx.recv(rest);
-					trace!(?res, "SCTP DECRYPT");
-					match res {
-						Err(e) if e.high_level() == Some(codes::SslWantRead) => break,
-						Ok(length) if length > 0 => {
-							// Update the send_to address using the last seen src ip and port
-							let Wrapper { last_update, send_to, ..} = ctx.io_mut().unwrap();
-							// TODO: handle src tracking to limit src ip+port to a single dtls connection
-							*last_update = Instant::now();
-							*send_to = (in_ip.src, src_port);
+									let res = ctx.recv(rest);
+									trace!(?res, "SCTP DECRYPT");
+									match res {
+										Err(e) if e.high_level() == Some(codes::SslWantRead) => break,
+										Ok(length) if length > 0 => {
+											// Update the send_to address using the last seen src ip and port
+											let Wrapper { last_update, send_to, ..} = ctx.io_mut().unwrap();
+											// TODO: handle src tracking to limit src ip+port to a single dtls connection
+											*last_update = Instant::now();
+											*send_to = (in_ip.src, src_port);
 
-							let length = u16::try_from(length).unwrap();
-							out_ip.flags.set(6 << 28);
-							out_ip.payload_length.set(length);
-							out_ip.next_header = ip_proto::SCTP;
-							out_ip.hop_limit = 5;
-							out_ip.src = in_ip.dst;
-							out_ip.dst = endpoint;
-							let tot_len = out_ip.len();
-							network.send(&decrypted[..tot_len])?;
-						}
-						_ => {
-							connections.remove(&in_ip.dst);
-							break
+											let length = u16::try_from(length).unwrap();
+											out_ip.flags.set(6 << 28);
+											out_ip.payload_length.set(length);
+											out_ip.next_header = ip_proto::SCTP;
+											out_ip.hop_limit = 5;
+											out_ip.src = in_ip.dst;
+											out_ip.dst = endpoint;
+											let tot_len = out_ip.len();
+											network.send(&decrypted[..tot_len])?;
+										}
+										_ => {
+											connections.remove(&in_ip.dst);
+											break
+										}
+									}
+								}
+								// Encrypt the SCTP packet (if it came from endpoint)
+								ip_proto::SCTP => {
+									// Drop packets if they didn't originate from the endpoint we're relaying for
+									if in_ip.src != endpoint { continue }
+
+									let res = ctx.send(&recv_buffer.borrow()[40..in_ip.len()]);
+									trace!(?res, "SCTP ENCRYPT");
+									match res {
+										Err(e) if e.high_level() == Some(codes::SslWantRead) => break,
+										Ok(length) if length > 0 => break,
+										_ => {
+											connections.remove(&in_ip.dst);
+											break
+										}
+									}
+								}
+								// We've filtered to UDP or SCTP already
+								_ => unreachable!(),
+							}
 						}
 					}
+					Token(_key) => break,
 				}
-				// Encrypt the SCTP packet (if it came from endpoint)
-				ip_proto::SCTP => {
-					// Drop packets if they didn't originate from the endpoint we're relaying for
-					if in_ip.src != endpoint { continue }
-
-					let res = ctx.send(&recv_buffer.borrow()[40..in_ip.len()]);
-					trace!(?res, "SCTP ENCRYPT");
-					match res {
-						Err(e) if e.high_level() == Some(codes::SslWantRead) => break,
-						Ok(length) if length > 0 => break,
-						_ => {
-							connections.remove(&in_ip.dst);
-							break
-						}
-					}
-				}
-				// We've filtered to UDP or SCTP already
-				_ => unreachable!(),
 			}
 		}
+		poll.poll(&mut events, Some(cleanup))?;
 	}
 }

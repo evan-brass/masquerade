@@ -306,6 +306,7 @@ dependencies = [
  "clap",
  "eyre",
  "mbedtls",
+ "mio",
  "tappers",
  "tracing",
  "tracing-subscriber",
