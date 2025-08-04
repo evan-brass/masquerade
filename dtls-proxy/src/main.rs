@@ -36,6 +36,32 @@ struct Args {
 	if_name: Option<String>,
 }
 
+struct IndexIp {
+	proto: u8,
+	site: u16,
+	index: u64,
+}
+impl From<IndexIp> for [u8; 16] {
+	fn from(IndexIp { proto, site, index }: IndexIp) -> Self {
+		let mut octets = [0xfd, proto, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+		octets[2..4].copy_from_slice(&site.to_be_bytes());
+		octets[8..].copy_from_slice(&index.to_be_bytes());
+		octets
+	}
+}
+impl TryFrom<[u8; 16]> for IndexIp {
+	type Error = ();
+	fn try_from(octets: [u8; 16]) -> Result<Self, Self::Error> {
+		if octets[0] != 0xfd || octets[4..8] != [0, 0, 0, 0] {
+			return Err(())
+		}
+		let proto = octets[1];
+		let site = u16::from_be_bytes(octets[2..4].try_into().unwrap());
+		let index = u64::from_be_bytes(octets[8..].try_into().unwrap());
+		Ok(Self { proto, site, index })
+	}
+}
+
 struct Wrapper {
 	// Random Destination ip
 	send_from: ([u8; 16], u16),
