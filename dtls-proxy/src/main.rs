@@ -24,9 +24,11 @@ use mio::{Events, Interest, Poll, Token};
 use socket2::{Domain, Protocol, Socket, Type};
 use tappers::Tun;
 use tracing_subscriber::EnvFilter;
-use tracing::trace;
+use tracing::{info, trace};
 use wire::{ip_proto, FromBytes, Ip6Header, SctpHeader, UdpHeader};
 use tappers::Interface;
+use stun::{Stun, Class, Method, attr::*, attr::integrity::Integrity, attr::parse::AttrIter as _};
+use std::net::SocketAddr;
 
 #[derive(Parser)]
 #[command(version, about)]
@@ -40,6 +42,41 @@ struct Args {
 	#[arg(long, short)]
 	if_name: Option<String>,
 }
+
+const B62_CHARSET: &[char] = &[
+	'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S',
+	'T', 'U', 'V', 'W', 'X', 'Y', 'Z', 'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l',
+	'm', 'n', 'o', 'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z', '0', '1', '2', '3', '4',
+	'5', '6', '7', '8', '9',
+];
+fn to_base62(fingerprint: &mut [u8]) -> String {
+	let mut res = [0; 43];
+	for j in 0..43 {
+		let mut remainder = 0;
+		for i in 0..32 {
+			let v = 256 * remainder + fingerprint[i] as u32;
+			remainder = v % 62;
+			fingerprint[i] = (v / 62) as u8;
+		}
+		res[j] = remainder as u8;
+	}
+	res.reverse();
+
+	let mut ret = String::with_capacity(43);
+
+	for i in res {
+		if ret.is_empty() && i == 0 {
+			continue;
+		}
+		ret.push(B62_CHARSET[i as usize]);
+	}
+	if ret.is_empty() {
+		ret.push('A');
+	}
+
+	ret
+}
+
 
 struct IndexIp {
 	proto: u8,
@@ -184,13 +221,19 @@ fn main() -> Result<Never> {
 		trace!("MBEDTLS({level}) {file}:{line} {message}");
 	});
 	config.set_rng(rng.clone());
-	// TODO: Peer certificate verify
 
 	// Load our certificate file
 	let mut pem = std::fs::read(args.cert_file)?; pem.push(0); // Null terminate the PEM as required by mbedtls
-	let cert = Arc::new(Certificate::from_pem_multiple(&pem)?);
+	let cert = Certificate::from_pem(&pem)?;
+
+	let mut fingerprint = [0; 32];
+	assert_eq!(hash::Md::hash(hash::Type::Sha256, cert.as_der(), &mut fingerprint)?, 32);
+	let self_pid = to_base62(&mut fingerprint);
+	info!(?self_pid, "SELF PID");
+
+	let fullchain = Arc::new(FromIterator::from_iter([cert]));
 	let key = Arc::new(Pk::from_private_key(&pem, None)?);
-	config.push_cert(cert, key)?;
+	config.push_cert(fullchain, key)?;
 
 	// Enable DTLS cookies
 	let cookies = CookieContext::new(rng)?;
@@ -237,31 +280,141 @@ fn main() -> Result<Never> {
 				match e.token() {
 					NET => {
 						// Read a packet from the network interface
-						let (in_ip, src_port, dst_port) = {
-							let mut buffer = recv_buffer.borrow_mut();
-							let Ok(length) = network.recv( buffer.as_mut_slice()) else { break };
-							let (ip, rest) = Ip6Header::ref_from_prefix(buffer.as_slice()).unwrap();
-							trace!(?ip, "TUN PACKET");
-							if (ip.flags.get() >> 28) != 6 { continue }
-							if ip.len() != length { continue }
+						let mut buffer = recv_buffer.borrow_mut();
+						let Ok(length) = network.recv(buffer.as_mut_slice()) else { break };
+						let (ip, rest) = Ip6Header::mut_from_prefix(buffer.as_mut_slice()).unwrap();
+						let cid = Ipv6Addr::from(ip.dst);
 
-							let (src_port, dst_port) = match (ip.next_header, ip.payload_length.get()) {
-								(ip_proto::UDP, 8..) => {
-									let (udp, _rest) = UdpHeader::ref_from_prefix(rest).unwrap();
-									if udp.length != ip.payload_length { continue }
-									(udp.src_port.get(), udp.dst_port.get())
-								}
-								(ip_proto::SCTP, 12..) => {
-									let (sctp, _rest) = SctpHeader::ref_from_prefix(rest).unwrap();
-									(sctp.src_port.get(), sctp.dst_port.get())
-								}
-								_ => continue,
-							};
+						trace!(?ip, "TUN PACKET");
+						if (ip.flags.get() >> 28) != 6 { continue }
+						if ip.len() != length { continue }
 
-							(ip.clone(), src_port, dst_port)
+						let (in_ip, src_port, dst_port) = match (ip.next_header, ip.payload_length.get(), rest[8]) {
+							// Possibly STUN
+							(ip_proto::UDP, 8.., 0..3) => {
+								let (udp, rest) = UdpHeader::mut_from_prefix(rest).unwrap();
+								let sender = SocketAddrV6::new(ip.src.into(), udp.src_port.get(), 0, 0);
+								let receiver = SocketAddrV6::new(cid, udp.dst_port.get(), 0, 0);
+
+								let mut inner = Stun {
+									buffer: rest,
+								};
+								if inner.len() != ip.payload_length.get() as usize - 8 {
+									continue;
+								}
+								if inner.class() != Class::Request || inner.method() != Method::Binding {
+									continue;
+								}
+
+								// Parse ICE attributes
+								let mut username = None;
+								let mut integrity = None;
+								let mut ice_controlled = None;
+								let mut ice_controlling = None;
+								let mut priority = None;
+								let mut use_candidate = None;
+								let mut fingerprint = None;
+								let unknowns = inner
+									.into_iter()
+									.parse::<USERNAME, &str>(&mut username)
+									.parse::<MESSAGE_INTEGRITY, Integrity<20>>(&mut integrity)
+									.parse::<ICE_CONTROLLED, u64>(&mut ice_controlled)
+									.parse::<ICE_CONTROLLING, u64>(&mut ice_controlling)
+									.parse::<PRIORITY, u32>(&mut priority)
+									.parse::<USE_CANDIDATE, ()>(&mut use_candidate)
+									.parse::<FINGERPRINT, ()>(&mut fingerprint)
+									.collect_unknown::<1>();
+
+								// Make sure all expected attributes are present and no unexpected attributes exist
+								let (None, Some(username), Some(integrity), Some(_), Some(_), Some(())) = (
+									unknowns,
+									username,
+									integrity,
+									ice_controlled.xor(ice_controlling),
+									priority,
+									fingerprint,
+								) else {
+									continue;
+								};
+
+								// Split the username into dst_ufrag and src_ufrag
+								let Some((dst_ufrag, src_ufrag)) = username.split_once(':') else {
+									continue;
+								};
+
+								// Split the dst_ufrag into dst_pid and src_pid
+								let Some((dst_pid, src_pid)) = dst_ufrag.split_once('+') else {
+									continue;
+								};
+
+								// Only answer connection tests for our certificate
+								if dst_pid != self_pid {
+									continue
+								}
+
+								let ice_key = b"the/ice/password/constant";
+								// Wrong credentials
+								if !integrity.verify(ice_key) {
+									inner.set_length(0);
+									inner.set_class(Class::Error);
+									inner.append::<ERROR_CODE, _>(&(441, "")).unwrap();
+									inner.append::<FINGERPRINT, _>(&()).unwrap();
+								}
+								// ICE Controlled - error switch role
+								else if ice_controlled.is_some() {
+									inner.set_length(0);
+									inner.set_class(Class::Error);
+									inner.append::<ERROR_CODE, _>(&(487, "")).unwrap();
+									inner
+										.append::<MESSAGE_INTEGRITY, _>(&ice_key.as_slice())
+										.unwrap();
+									inner.append::<FINGERPRINT, _>(&()).unwrap();
+								}
+								// Success
+								else {
+									inner.set_length(0);
+									inner.set_class(Class::Success);
+									inner
+										.append::<XOR_MAPPED_ADDRESS, SocketAddr>(&sender.into())
+										.unwrap();
+									inner
+										.append::<MESSAGE_INTEGRITY, _>(&ice_key.as_slice())
+										.unwrap();
+									inner.append::<FINGERPRINT, _>(&()).unwrap();
+								}
+
+								// Send the response packet:
+								ip.dst = sender.ip().octets();
+								ip.src = receiver.ip().octets();
+								udp.dst_port.set(sender.port());
+								udp.src_port.set(receiver.port());
+								ip.payload_length.set(inner.len() as u16 + 8);
+								udp.length = ip.payload_length;
+								udp.checksum.set(0);
+								ip.flags.set(6 << 28);
+
+								// Send the packet
+								let length = ip.len();
+								let _ = network.send(&buffer[..length]);
+								continue;
+							}
+							// Possibly DTLS
+							(ip_proto::UDP, 8.., 20..64) => {
+								let (udp, rest) = UdpHeader::mut_from_prefix(rest).unwrap();
+								if udp.length != ip.payload_length { continue }
+								(ip.clone(), udp.src_port.get(), udp.dst_port.get())
+							}
+							// Possibly SCTP
+							(ip_proto::SCTP, 12.., _) => {
+								(ip.clone(), 0, 0)
+							}
+							// Whatever else this is
+							_ => continue,
 						};
+						// Release everything that might be borrowing from recv_buffer, because it will be read via the DTLS Context
+						drop(buffer);
 
-						let cid = Ipv6Addr::from(in_ip.dst);
+						// Create/Retreive the DTLS context for this ip
 						let entry = connections.entry(cid);
 						let ctx = match entry {
 							Entry::Vacant(_) if in_ip.next_header != ip_proto::UDP => {
@@ -304,7 +457,6 @@ fn main() -> Result<Never> {
 								// Decrypt the DTLS packet
 								ip_proto::UDP => {
 									let (out_ip, rest) = Ip6Header::mut_from_prefix(decrypted.as_mut_slice()).unwrap();
-
 
 									let res = ctx.recv(rest);
 									trace!(?res, "SCTP DECRYPT");
@@ -362,7 +514,7 @@ fn main() -> Result<Never> {
 						let Ok(()) = context.verify_result() else { continue };
 						let Some(cert) = cert_list.iter().next() else { continue };
 						let mut fingerprint = [0; 32];
-						assert_eq!(hash::Md::hash(hash::Type::Sha256, cert.as_der(), &mut fingerprint), Ok(32));
+						assert_eq!(hash::Md::hash(hash::Type::Sha256, cert.as_der(), &mut fingerprint)?, 32);
 						trace!(?sender, ?cert, ?fingerprint, "SCTP Establish");
 					}
 					Token(_key) => break,

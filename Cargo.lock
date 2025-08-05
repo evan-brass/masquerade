@@ -308,6 +308,7 @@ dependencies = [
  "mbedtls",
  "mio",
  "socket2",
+ "stun",
  "tappers",
  "tracing",
  "tracing-subscriber",
