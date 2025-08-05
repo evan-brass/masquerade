@@ -12,14 +12,16 @@ type Never = core::convert::Infallible;
 use clap::Parser;
 use mbedtls::error::codes;
 use mbedtls::error::HiError::SslWantRead;
+use mbedtls::hash;
 use mbedtls::pk::Pk;
 use mbedtls::rng::{CtrDrbg, OsEntropy};
 use mbedtls::ssl::config::{Endpoint, Preset, Transport};
 use mbedtls::ssl::context::Timer;
 use mbedtls::ssl::{Config, Context, CookieContext, Io};
-use mbedtls::x509::Certificate;
+use mbedtls::x509::{Certificate, VerifyError};
 use mio::unix::SourceFd;
 use mio::{Events, Interest, Poll, Token};
+use socket2::{Domain, Protocol, Socket, Type};
 use tappers::Tun;
 use tracing_subscriber::EnvFilter;
 use tracing::trace;
@@ -131,6 +133,7 @@ impl Io for Wrapper {
 }
 
 const NET: Token = Token(usize::MAX);
+const SCTP: Token = Token(usize::MAX - 1);
 
 fn main() -> Result<Never> {
 	// Enable logging
@@ -145,11 +148,6 @@ fn main() -> Result<Never> {
 	let mut poll = Poll::new()?;
 	let mut events = Events::with_capacity(128);
 
-	// Parse the destination ip address
-	let sctp_addr = SocketAddrV6::from_str(&args.sctp)?;
-	// let IndexIp { site, .. } = IndexIp::try_from(sctp_addr.ip()).map_err(|ip| )?;
-	let endpoint = sctp_addr.ip().octets();
-
 	// Setup the TUN interface
 	let mut network = if let Some(if_name) = args.if_name {
 		Tun::new_named(Interface::new(if_name)?)?
@@ -159,6 +157,19 @@ fn main() -> Result<Never> {
 	network.set_nonblocking(true)?;
 	poll.registry().register(&mut SourceFd(&network.as_raw_fd()), NET, Interest::READABLE)?;
 	let network = Rc::new(network);
+
+	// Parse the destination ip address
+	let sctp_addr = SocketAddrV6::from_str(&args.sctp)?;
+	// let IndexIp { site, .. } = IndexIp::try_from(sctp_addr.ip()).map_err(|ip| )?;
+	let endpoint = sctp_addr.ip().octets();
+
+	// Bind our SCTP Listener
+	let sctp = Socket::new(Domain::IPV6, Type::STREAM, Some(Protocol::SCTP))?;
+	// TODO: Why doesn't sctp_addr work here?
+	sctp.bind(&SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, sctp_addr.port(), 0, 0).into())?;
+	sctp.set_nonblocking(true)?;
+	sctp.listen(128)?;
+	poll.registry().register(&mut SourceFd(&sctp.as_raw_fd()), SCTP, Interest::READABLE)?;
 
 	// Enable mbedtls logging
 	unsafe { mbedtls::set_global_debug_threshold(2); }
@@ -184,6 +195,14 @@ fn main() -> Result<Never> {
 	// Enable DTLS cookies
 	let cookies = CookieContext::new(rng)?;
 	config.set_dtls_cookies(Arc::new(cookies));
+	config.set_authmode(mbedtls::ssl::config::AuthMode::Optional);
+	config.set_verify_callback(|cert, unk, verify_error| {
+		trace!(?cert, ?unk, ?verify_error, "CERT VERIFY");
+		// WebRTC mostly doesn't use verified certificates
+		verify_error.remove(VerifyError::CERT_NOT_TRUSTED);
+		// TODO: Verify that the certificate is not valid for more than 365 days?
+		Ok(())
+	});
 
 	let config = Arc::new(config);
 
@@ -242,7 +261,8 @@ fn main() -> Result<Never> {
 							(ip.clone(), src_port, dst_port)
 						};
 
-						let entry = connections.entry(in_ip.dst.into());
+						let cid = Ipv6Addr::from(in_ip.dst);
+						let entry = connections.entry(cid);
 						let ctx = match entry {
 							Entry::Vacant(_) if in_ip.next_header != ip_proto::UDP => {
 								// TODO: ICMP error?
@@ -308,7 +328,7 @@ fn main() -> Result<Never> {
 											network.send(&decrypted[..tot_len])?;
 										}
 										_ => {
-											connections.remove(&in_ip.dst);
+											connections.remove(&cid);
 											break
 										}
 									}
@@ -324,7 +344,7 @@ fn main() -> Result<Never> {
 										Err(e) if e.high_level() == Some(codes::SslWantRead) => break,
 										Ok(length) if length > 0 => break,
 										_ => {
-											connections.remove(&in_ip.dst);
+											connections.remove(&cid);
 											break
 										}
 									}
@@ -333,6 +353,17 @@ fn main() -> Result<Never> {
 								_ => unreachable!(),
 							}
 						}
+					}
+					SCTP => {
+						let Ok((stream, sender)) = sctp.accept() else { break };
+						let Some(sender) = sender.as_socket_ipv6() else { continue };
+						let Some(context) = connections.get(&sender.ip()) else { continue };
+						let Ok(Some(cert_list)) = context.peer_cert() else { continue };
+						let Ok(()) = context.verify_result() else { continue };
+						let Some(cert) = cert_list.iter().next() else { continue };
+						let mut fingerprint = [0; 32];
+						assert_eq!(hash::Md::hash(hash::Type::Sha256, cert.as_der(), &mut fingerprint), Ok(32));
+						trace!(?sender, ?cert, ?fingerprint, "SCTP Establish");
 					}
 					Token(_key) => break,
 				}

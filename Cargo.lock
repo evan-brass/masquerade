@@ -307,6 +307,7 @@ dependencies = [
  "eyre",
  "mbedtls",
  "mio",
+ "socket2",
  "tappers",
  "tracing",
  "tracing-subscriber",
