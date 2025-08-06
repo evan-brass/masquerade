@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 clap = { version = "4.5.40", features = ["derive"] }
 eyre = "0.6.12"
+libc = "0.2.174"
 mbedtls = { version = "0.13.2", features = ["debug", "ssl"] }
 mio = { version = "1.0.4", features = ["os-ext"] }
 slab = "0.4.10"

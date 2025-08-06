@@ -1,6 +1,7 @@
 use std::cell::RefCell;
 use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
+use std::io::{Read, Write};
 use std::net::{Ipv6Addr, SocketAddrV6};
 use std::os::fd::AsRawFd;
 use std::rc::Rc;
@@ -30,6 +31,8 @@ use tappers::Interface;
 use stun::{Stun, Class, Method, attr::*, attr::integrity::Integrity, attr::parse::AttrIter as _};
 use std::net::SocketAddr;
 use slab::Slab;
+use core::ptr::from_ref;
+use core::ffi::c_void;
 
 #[derive(Parser)]
 #[command(version, about)]
@@ -126,6 +129,9 @@ struct Wrapper {
 
 	// Timestamp to cleanup old connections
 	last_update: Instant,
+
+	// Possible SCTP Socket of the parent DTLS Context
+	sctp: Option<Socket>,
 }
 impl Io for Wrapper {
 	fn recv(&mut self, buf: &mut [u8]) -> mbedtls::Result<usize> {
@@ -293,26 +299,34 @@ fn main() -> Result<Never> {
 						match (IndexIp::try_from(&Ipv6Addr::from(ip.dst)), ip.next_header, ip.payload_length.get(), rest[8]) {
 							// Traffic for VPN Allocations
 							(Ok(IndexIp { proto: 0x04, index, .. }), _, _, _) => {
-								trace!(?index, "VPN Traffic");
-								continue
+								let Some(context) = connections.get_mut(index as usize) else { continue };
+								let Wrapper { sctp, .. } = context.io_mut().unwrap();
+								let Some(socket) = sctp else { continue };
+
+								// Relay the IPv6 packet as SCTP data
+								trace!(packet = &buffer[..length], ?index, "In");
+								let _ = socket.write(&buffer[..length]);
 							}
 							// Plaintext SCTP
 							(Ok(IndexIp { proto: 0x03, index, .. }), ip_proto::SCTP, 12.., _) => {
-								let Some(context) = connections.get_mut(index as usize) else { continue };
+								let key = index as usize;
+								let Some(context) = connections.get_mut(key) else { continue };
 
 								// Drop packets if they didn't originate from the endpoint we're relaying for
 								if ip.src != endpoint { continue }
 
 								// Try to encrypt the SCTP plaintext
 								let res = context.send(&rest[..ip.payload_length.get() as usize]);
-								trace!(?res, "SCTP ENCRYPT");
+								trace!(?res, "DTLS SEND");
 								match res {
 									Err(e) if e.high_level() == Some(codes::SslWantRead) => {},
 									Ok(length) if length > 0 => {},
 									_ => {
-										let context = connections.remove(index as usize);
-										let Wrapper { send_from, .. } = context.io().unwrap();
-										// TODO: Unregister and drop any SCTP socket
+										let context = connections.remove(key);
+										let Wrapper { send_from, sctp, .. } = context.io().unwrap();
+										if let Some(socket) = sctp {
+											poll.registry().deregister(&mut SourceFd(&socket.as_raw_fd()))?;
+										}
 										cids.remove(send_from);
 									}
 								}
@@ -333,6 +347,7 @@ fn main() -> Result<Never> {
 											send_buffer: send_buffer.clone(),
 											network: network.clone(),
 											last_update: Instant::now(),
+											sctp: None,
 										};
 										let mut ssl = Context::new(config.clone());
 										ssl.set_timer_callback(Box::new(Timer::new()));
@@ -364,7 +379,7 @@ fn main() -> Result<Never> {
 									let (out_ip, rest) = Ip6Header::mut_from_prefix(decrypted.as_mut_slice()).unwrap();
 
 									let res = context.recv(rest);
-									trace!(?res, "SCTP DECRYPT");
+									trace!(?res, "DTLS RECV");
 									match res {
 										Err(e) if e.high_level() == Some(codes::SslWantRead) => break,
 										Ok(length) if length > 0 => {
@@ -386,8 +401,10 @@ fn main() -> Result<Never> {
 										}
 										_ => {
 											let context = connections.remove(key);
-											let Wrapper { send_from, .. } = context.io().unwrap();
-											// TODO: Unregister and drop any SCTP Socket on Wrapper
+											let Wrapper { send_from, sctp, .. } = context.io().unwrap();
+											if let Some(socket) = sctp {
+												poll.registry().deregister(&mut SourceFd(&socket.as_raw_fd()))?;
+											}
 											cids.remove(send_from);
 											break
 										}
@@ -507,10 +524,12 @@ fn main() -> Result<Never> {
 						}
 					}
 					SCTP => {
-						let Ok((_socket, proxy_ip)) = sctp.accept() else { break };
+						// Accept the SCTP Socket, and then associate it with a DTLS Context
+						let Ok((socket, proxy_ip)) = sctp.accept() else { break };
 						let Some(proxy_ip) = proxy_ip.as_socket_ipv6() else { continue };
 						let Ok(IndexIp { proto: 0x03, index, .. }) = proxy_ip.ip().try_into() else { continue };
-						let Some(context) = connections.get(index as usize) else { continue };
+						let key = index as usize;
+						let Some(context) = connections.get_mut(key) else { continue };
 						let Ok(Some(cert_list)) = context.peer_cert() else { continue };
 						let Ok(()) = context.verify_result() else { continue };
 						let Some(cert) = cert_list.iter().next() else { continue };
@@ -518,8 +537,74 @@ fn main() -> Result<Never> {
 						assert_eq!(hash::Md::hash(hash::Type::Sha256, cert.as_der(), &mut fingerprint)?, 32);
 						let pid = to_base62(&mut fingerprint);
 						trace!(?pid, ?index, ?fingerprint, ?cert, "SCTP Establish");
+
+						// Configure Unreliable (zero retransmit)
+						// let pr_info = libc::sctp_prinfo {
+						// 	pr_policy: libc::SCTP_PR_SCTP_RTX as u16,
+						// 	pr_value: 0
+						// };
+						// if 0 != unsafe { libc::setsockopt(
+						// 	assoc.as_raw_fd(),
+						// 	libc::IPPROTO_SCTP,
+						// 	libc::SCTP_DEFAULT_PRINFO,
+						// 	from_ref(&pr_info).cast::<c_void>(),
+						// 	size_of_val(&pr_info) as libc::socklen_t
+						// ) } {
+						// 	continue
+						// }
+
+						// Configure stream 1, unordered, and a binary data type
+						let snd_info = libc::sctp_sndinfo {
+							snd_sid: 1,
+							snd_flags: libc::SCTP_UNORDERED as u16,
+							snd_ppid: 53_u32.to_be() /* WebRTC Binary PPID */,
+							snd_context: 0,
+							snd_assoc_id: 0,
+						};
+						if 0 != unsafe { libc::setsockopt(
+							socket.as_raw_fd(),
+							libc::IPPROTO_SCTP,
+							libc::SCTP_DEFAULT_SNDINFO,
+							from_ref(&snd_info).cast::<c_void>(),
+							size_of_val(&snd_info) as libc::socklen_t
+						) } {
+							continue
+						}
+						socket.set_nonblocking(true)?;
+						poll.registry().register(&mut SourceFd(&socket.as_raw_fd()), Token(key), Interest::READABLE)?;
+						let wrapper = context.io_mut().unwrap();
+						wrapper.sctp = Some(socket);
 					}
-					Token(_key) => break,
+					// Data available on a split-off SCTP Socket
+					Token(key) => {
+						let context = connections.get(key).unwrap();
+						let Some(Wrapper { sctp: Some(socket), .. }) = context.io() else { unreachable!() };
+						let mut socket = socket;
+
+						let mut buffer = recv_buffer.borrow_mut();
+						let Ok(length) = socket.read(buffer.as_mut_slice()) else { break };
+
+						trace!(?length, "VPN Packet");
+						let (ip, _rest) = Ip6Header::mut_from_prefix(buffer.as_mut_slice()).unwrap();
+						if ip.flags.get() >> 28 != 6 { continue }
+						if ip.len() != length { continue }
+						let exp_src = Ipv6Addr::from(&IndexIp { proto: 0x04, site: our_site, index: key as u64}).octets();
+
+						// TODO: Just drop the packet here, but send a reliable JSON configuration message containing your assigned ip address when we first split-off the SCTP association.
+						if ip.src != exp_src {
+							ip.dst = exp_src;
+							ip.src = [0; 16];
+							ip.payload_length.set(0);
+							ip.next_header = 0xff;
+							let len = ip.len();
+
+							trace!(packet = &buffer[..len], "Discover");
+							socket.write(&buffer[..len])?;
+							continue
+						}
+						trace!(packet = &buffer[..length], "Out");
+						let _ = network.send(&buffer[..length]);
+					},
 				}
 			}
 		}
