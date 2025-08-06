@@ -35,13 +35,13 @@ struct Args {
 
 // We assign a link-local ip for each SCTP Association u64 <-> Link local ip
 fn to_ip(site: u16, index: u64) -> [u8; 16] {
-	let mut octets = [0xfd, 0x04, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+	let mut octets = [0xfd, 0x05, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
 	octets[2..4].copy_from_slice(&site.to_be_bytes());
 	octets[8..].copy_from_slice(&index.to_be_bytes());
 	octets
 }
 fn from_ip(octets: [u8; 16]) -> Option<(u16, u64)> {
-	if octets[0..2] != [0xfd, 0x04] {
+	if octets[0..2] != [0xfd, 0x05] {
 		return None;
 	}
 	let site = u16::from_be_bytes(octets[2..4].try_into().unwrap());

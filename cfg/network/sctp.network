@@ -8,4 +8,4 @@ VRF=relay-isolation
 
 # sctp-vpn allocated addresses
 [Route]
-Destination=fd04:1::/64
+Destination=fd05:1::/64

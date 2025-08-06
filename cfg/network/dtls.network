@@ -6,6 +6,14 @@ ConfigureWithoutCarrier=yes
 IgnoreCarrierLoss=yes
 VRF=relay-isolation
 
-# DTLS proxy
+# DTLS CIDs
 [Route]
 Destination=fd02::/16
+
+# SCTP Plaintext
+[Route]
+Destination=fd03:1::/64
+
+# VPN Traffic
+[Route]
+Destination=fd04:1::/64

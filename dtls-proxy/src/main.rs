@@ -7,7 +7,7 @@ use std::rc::Rc;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use eyre::Result;
+use eyre::{eyre, Result};
 type Never = core::convert::Infallible;
 use clap::Parser;
 use mbedtls::error::codes;
@@ -25,10 +25,11 @@ use socket2::{Domain, Protocol, Socket, Type};
 use tappers::Tun;
 use tracing_subscriber::EnvFilter;
 use tracing::{info, trace};
-use wire::{ip_proto, FromBytes, Ip6Header, SctpHeader, UdpHeader};
+use wire::{ip_proto, FromBytes, Ip6Header, UdpHeader};
 use tappers::Interface;
 use stun::{Stun, Class, Method, attr::*, attr::integrity::Integrity, attr::parse::AttrIter as _};
 use std::net::SocketAddr;
+use slab::Slab;
 
 #[derive(Parser)]
 #[command(version, about)]
@@ -197,7 +198,7 @@ fn main() -> Result<Never> {
 
 	// Parse the destination ip address
 	let sctp_addr = SocketAddrV6::from_str(&args.sctp)?;
-	// let IndexIp { site, .. } = IndexIp::try_from(sctp_addr.ip()).map_err(|ip| )?;
+	let IndexIp { site: our_site, .. } = IndexIp::try_from(sctp_addr.ip()).map_err(|_ip| eyre!("sctp address wasn't an indexip"))?;
 	let endpoint = sctp_addr.ip().octets();
 
 	// Bind our SCTP Listener
@@ -256,7 +257,8 @@ fn main() -> Result<Never> {
 	let mut decrypted = [0; BUFFER_LENGTH];
 
 	// Connection state
-	let mut connections = BTreeMap::new();
+	let mut cids: BTreeMap<SocketAddrV6, usize> = BTreeMap::new();
+	let mut connections: Slab<Context<Wrapper>> = Slab::new();
 	// TODO: Keep a map from (src ip, src port) -> dst ip so that we limit each src socket addr to 1 DTLS connection.
 
 	// Cleanup state
@@ -283,18 +285,120 @@ fn main() -> Result<Never> {
 						let mut buffer = recv_buffer.borrow_mut();
 						let Ok(length) = network.recv(buffer.as_mut_slice()) else { break };
 						let (ip, rest) = Ip6Header::mut_from_prefix(buffer.as_mut_slice()).unwrap();
-						let cid = Ipv6Addr::from(ip.dst);
 
 						trace!(?ip, "TUN PACKET");
 						if (ip.flags.get() >> 28) != 6 { continue }
 						if ip.len() != length { continue }
 
-						let (in_ip, src_port, dst_port) = match (ip.next_header, ip.payload_length.get(), rest[8]) {
+						match (IndexIp::try_from(&Ipv6Addr::from(ip.dst)), ip.next_header, ip.payload_length.get(), rest[8]) {
+							// Traffic for VPN Allocations
+							(Ok(IndexIp { proto: 0x04, index, .. }), _, _, _) => {
+								trace!(?index, "VPN Traffic");
+								continue
+							}
+							// Plaintext SCTP
+							(Ok(IndexIp { proto: 0x03, index, .. }), ip_proto::SCTP, 12.., _) => {
+								let Some(context) = connections.get_mut(index as usize) else { continue };
+
+								// Drop packets if they didn't originate from the endpoint we're relaying for
+								if ip.src != endpoint { continue }
+
+								// Try to encrypt the SCTP plaintext
+								let res = context.send(&rest[..ip.payload_length.get() as usize]);
+								trace!(?res, "SCTP ENCRYPT");
+								match res {
+									Err(e) if e.high_level() == Some(codes::SslWantRead) => {},
+									Ok(length) if length > 0 => {},
+									_ => {
+										let context = connections.remove(index as usize);
+										let Wrapper { send_from, .. } = context.io().unwrap();
+										// TODO: Unregister and drop any SCTP socket
+										cids.remove(send_from);
+									}
+								}
+							}
+							// Possibly DTLS
+							(Err(src_ip), ip_proto::UDP, 9.., 20..64) => {
+								let (udp, _rest) = UdpHeader::mut_from_prefix(rest).unwrap();
+								let cid = SocketAddrV6::new(src_ip, udp.dst_port.get(), 0, 0);
+								let sender = SocketAddrV6::new(ip.src.into(), udp.src_port.get(), 0, 0);
+								drop(buffer);
+
+								let key = match cids.entry(cid) {
+									Entry::Vacant(v) => {
+										let wrap = Wrapper {
+											send_from: cid,
+											send_to: sender,
+											recv_buffer: recv_buffer.clone(),
+											send_buffer: send_buffer.clone(),
+											network: network.clone(),
+											last_update: Instant::now(),
+										};
+										let mut ssl = Context::new(config.clone());
+										ssl.set_timer_callback(Box::new(Timer::new()));
+										// Set the *client id* which is really just input to do DTLS cookies.
+										let mut temp = [0; 18];
+										temp[0..16].copy_from_slice(&cid.ip().octets());
+										temp[16..18].copy_from_slice(&cid.port().to_ne_bytes());
+										ssl.set_client_transport_id_once(&temp);
+										let res = ssl.establish(wrap, None);
+										trace!(?res, "ESTABLISH");
+										match res {
+											Ok(()) => {}
+											Err(e) if e.high_level() == Some(SslWantRead) => {}
+											// Don't insert the new ssl unless we successfully establish or want more recv data
+											// TODO: This isn't correct: if we receive a non DTLS packet then the result would still be SslWantRead.  To fix this, we need to check that the Context's state has advanced past the client hello stage (meaning it must have had a valid DTLS Cookie).
+											_ => continue
+										}
+										*v.insert(connections.insert(ssl))
+									}
+									Entry::Occupied(entry) => *entry.get(),
+								};
+
+								let Some(context) = connections.get_mut(key) else {
+									continue
+								};
+
+								// Repeatedly Read the DTLS context
+								loop {
+									let (out_ip, rest) = Ip6Header::mut_from_prefix(decrypted.as_mut_slice()).unwrap();
+
+									let res = context.recv(rest);
+									trace!(?res, "SCTP DECRYPT");
+									match res {
+										Err(e) if e.high_level() == Some(codes::SslWantRead) => break,
+										Ok(length) if length > 0 => {
+											// Update the send_to address using the last seen src ip and port
+											let Wrapper { last_update, send_to, ..} = context.io_mut().unwrap();
+											// TODO: handle src tracking to limit src ip+port to a single dtls connection
+											*last_update = Instant::now();
+											*send_to = sender;
+
+											let length = u16::try_from(length).unwrap();
+											out_ip.flags.set(6 << 28);
+											out_ip.payload_length.set(length);
+											out_ip.next_header = ip_proto::SCTP;
+											out_ip.hop_limit = 5;
+											out_ip.src = Ipv6Addr::from(&IndexIp { proto: 0x03, site: our_site, index: key as u64 }).octets();
+											out_ip.dst = endpoint;
+											let tot_len = out_ip.len();
+											network.send(&decrypted[..tot_len])?;
+										}
+										_ => {
+											let context = connections.remove(key);
+											let Wrapper { send_from, .. } = context.io().unwrap();
+											// TODO: Unregister and drop any SCTP Socket on Wrapper
+											cids.remove(send_from);
+											break
+										}
+									}
+								}
+							}
 							// Possibly STUN
-							(ip_proto::UDP, 8.., 0..3) => {
+							(Err(src_ip), ip_proto::UDP, 9.., 0..3) => {
 								let (udp, rest) = UdpHeader::mut_from_prefix(rest).unwrap();
 								let sender = SocketAddrV6::new(ip.src.into(), udp.src_port.get(), 0, 0);
-								let receiver = SocketAddrV6::new(cid, udp.dst_port.get(), 0, 0);
+								let receiver = SocketAddrV6::new(src_ip, udp.dst_port.get(), 0, 0);
 
 								let mut inner = Stun {
 									buffer: rest,
@@ -338,12 +442,12 @@ fn main() -> Result<Never> {
 								};
 
 								// Split the username into dst_ufrag and src_ufrag
-								let Some((dst_ufrag, src_ufrag)) = username.split_once(':') else {
+								let Some((dst_ufrag, _src_ufrag)) = username.split_once(':') else {
 									continue;
 								};
 
 								// Split the dst_ufrag into dst_pid and src_pid
-								let Some((dst_pid, src_pid)) = dst_ufrag.split_once('+') else {
+								let Some((dst_pid, _src_pid)) = dst_ufrag.split_once('+') else {
 									continue;
 								};
 
@@ -398,124 +502,22 @@ fn main() -> Result<Never> {
 								let _ = network.send(&buffer[..length]);
 								continue;
 							}
-							// Possibly DTLS
-							(ip_proto::UDP, 8.., 20..64) => {
-								let (udp, rest) = UdpHeader::mut_from_prefix(rest).unwrap();
-								if udp.length != ip.payload_length { continue }
-								(ip.clone(), udp.src_port.get(), udp.dst_port.get())
-							}
-							// Possibly SCTP
-							(ip_proto::SCTP, 12.., _) => {
-								(ip.clone(), 0, 0)
-							}
-							// Whatever else this is
+							// Other
 							_ => continue,
-						};
-						// Release everything that might be borrowing from recv_buffer, because it will be read via the DTLS Context
-						drop(buffer);
-
-						// Create/Retreive the DTLS context for this ip
-						let entry = connections.entry(cid);
-						let ctx = match entry {
-							Entry::Vacant(_) if in_ip.next_header != ip_proto::UDP => {
-								// TODO: ICMP error?
-								// Don't create a DTLS context if we're receiving SCTP traffic
-								continue;
-							}
-							Entry::Vacant(v) => {
-								let send_from = SocketAddrV6::new(in_ip.dst.into(), dst_port, 0, 0);
-								let send_to = SocketAddrV6::new(in_ip.src.into(), src_port, 0, 0);
-								let wrap = Wrapper {
-									send_from,
-									send_to,
-									recv_buffer: recv_buffer.clone(),
-									send_buffer: send_buffer.clone(),
-									network: network.clone(),
-									last_update: Instant::now(),
-								};
-								let mut ssl = Context::new(config.clone());
-								ssl.set_timer_callback(Box::new(Timer::new()));
-								// Set the *client id* which is really just input to do DTLS cookies.
-								ssl.set_client_transport_id_once(&in_ip.dst);
-								let res = ssl.establish(wrap, None);
-								trace!(?res, "ESTABLISH");
-								match res {
-									Ok(()) => {}
-									Err(e) if e.high_level() == Some(SslWantRead) => {}
-									// Don't insert the new ssl unless we successfully establish or want more recv data
-									// TODO: This probably isn't correct, what if we receive a non DTLS packet - that would mean there isn'
-									_ => continue
-								}
-								v.insert(ssl)
-							}
-							Entry::Occupied(o) => o.into_mut()
-						};
-
-						// Retry the ssl operation until it would block, fails, or succeeds if it's SCTP
-						loop {
-							match in_ip.next_header {
-								// Decrypt the DTLS packet
-								ip_proto::UDP => {
-									let (out_ip, rest) = Ip6Header::mut_from_prefix(decrypted.as_mut_slice()).unwrap();
-
-									let res = ctx.recv(rest);
-									trace!(?res, "SCTP DECRYPT");
-									match res {
-										Err(e) if e.high_level() == Some(codes::SslWantRead) => break,
-										Ok(length) if length > 0 => {
-											// Update the send_to address using the last seen src ip and port
-											let Wrapper { last_update, send_to, ..} = ctx.io_mut().unwrap();
-											// TODO: handle src tracking to limit src ip+port to a single dtls connection
-											*last_update = Instant::now();
-											*send_to = SocketAddrV6::new(in_ip.src.into(), src_port, 0, 0);
-
-											let length = u16::try_from(length).unwrap();
-											out_ip.flags.set(6 << 28);
-											out_ip.payload_length.set(length);
-											out_ip.next_header = ip_proto::SCTP;
-											out_ip.hop_limit = 5;
-											out_ip.src = in_ip.dst;
-											out_ip.dst = endpoint;
-											let tot_len = out_ip.len();
-											network.send(&decrypted[..tot_len])?;
-										}
-										_ => {
-											connections.remove(&cid);
-											break
-										}
-									}
-								}
-								// Encrypt the SCTP packet (if it came from endpoint)
-								ip_proto::SCTP => {
-									// Drop packets if they didn't originate from the endpoint we're relaying for
-									if in_ip.src != endpoint { continue }
-
-									let res = ctx.send(&recv_buffer.borrow()[40..in_ip.len()]);
-									trace!(?res, "SCTP ENCRYPT");
-									match res {
-										Err(e) if e.high_level() == Some(codes::SslWantRead) => break,
-										Ok(length) if length > 0 => break,
-										_ => {
-											connections.remove(&cid);
-											break
-										}
-									}
-								}
-								// We've filtered to UDP or SCTP already
-								_ => unreachable!(),
-							}
 						}
 					}
 					SCTP => {
-						let Ok((stream, sender)) = sctp.accept() else { break };
-						let Some(sender) = sender.as_socket_ipv6() else { continue };
-						let Some(context) = connections.get(&sender.ip()) else { continue };
+						let Ok((_socket, proxy_ip)) = sctp.accept() else { break };
+						let Some(proxy_ip) = proxy_ip.as_socket_ipv6() else { continue };
+						let Ok(IndexIp { proto: 0x03, index, .. }) = proxy_ip.ip().try_into() else { continue };
+						let Some(context) = connections.get(index as usize) else { continue };
 						let Ok(Some(cert_list)) = context.peer_cert() else { continue };
 						let Ok(()) = context.verify_result() else { continue };
 						let Some(cert) = cert_list.iter().next() else { continue };
 						let mut fingerprint = [0; 32];
 						assert_eq!(hash::Md::hash(hash::Type::Sha256, cert.as_der(), &mut fingerprint)?, 32);
-						trace!(?sender, ?cert, ?fingerprint, "SCTP Establish");
+						let pid = to_base62(&mut fingerprint);
+						trace!(?pid, ?index, ?fingerprint, ?cert, "SCTP Establish");
 					}
 					Token(_key) => break,
 				}
