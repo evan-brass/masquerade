@@ -275,9 +275,19 @@ fn main() -> Result<Never> {
 	loop {
 		// Periodically Cleanup the connections
 		if last_cleanup.elapsed() > cleanup {
-			connections.retain(|_, v: &mut Context<Wrapper>| {
-				let Some(Wrapper { last_update, .. }) = v.io() else { unreachable!() };
-				last_update.elapsed() < timeout
+			cids.retain(|cid, key| {
+				let Some(context) = connections.get_mut(*key) else {
+					return false;
+				};
+				let Wrapper { last_update, sctp, .. } = context.io_mut().unwrap();
+				if last_update.elapsed() < timeout { return true }
+
+				if let Some(socket) = sctp {
+					poll.registry().deregister(&mut SourceFd(&socket.as_raw_fd())).expect("Failed to deregister SCTP socket during register.");
+				}
+				connections.remove(*key);
+
+				true
 			});
 			last_cleanup = Instant::now();
 		}
