@@ -53,3 +53,14 @@ pub struct SctpHeader {
 	pub vtag: U32,
 	pub checksum: U32_LE,
 }
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, KnownLayout, Immutable, Unaligned, FromBytes, IntoBytes)]
+pub struct DcepOpenHeader {
+	pub msg_typ: u8,
+	pub channel_typ: u8,
+	pub priority: U16,
+	pub reliability_parameter: U32,
+	pub label_len: U16,
+	pub protocol_len: U16,
+}

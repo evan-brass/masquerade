@@ -15,14 +15,15 @@ TODO: All of these _Service_:_Site_ should probably be _Site_:_Service_ but I do
 - UDP TURN
 	- ::/0 -> turn
 - TCP TURN
-	- fd01:{SITE_ID}::/64 -> turn
+	- fd01:{SITE_ID}::{STREAM_INDEX}/64 -> turn
 - DTLS Contexts
 	- fd02:{RANDOM_DTLS_CONTEXT}/16 -> vpn
 		- These must be IP6/UDP/DTLS packets
 	- fd03:{SITE_ID}::{CONTEXT_INDEX}/64 -> vpn
 		- These must be IP6/SCTP packets
 - SCTP Associations / Allocated IP addresses
-	- fd04:{SITE_ID}::{ASSOC_ID}/96 -> vpn
+	- fd04:{SITE_ID}::{CONTEXT_INDEX}/96 -> vpn
+		- I'm currently using one-to-one SCTP sockets which are split-off and stored on their DTLS context.
 - Inter-Site communication
 	- fd00::/8 -> site-vlan?
 

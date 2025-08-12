@@ -1,9 +1,10 @@
 use std::cell::RefCell;
 use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
-use std::io::{Read, Write};
+use std::io::IoSlice;
 use std::net::{Ipv6Addr, SocketAddrV6};
 use std::os::fd::AsRawFd;
+use std::ptr::{null_mut, write_unaligned, NonNull};
 use std::rc::Rc;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -22,17 +23,17 @@ use mbedtls::ssl::{Config, Context, CookieContext, Io};
 use mbedtls::x509::{Certificate, VerifyError};
 use mio::unix::SourceFd;
 use mio::{Events, Interest, Poll, Token};
-use socket2::{Domain, Protocol, Socket, Type};
+use socket2::{Domain, MaybeUninitSlice, MsgHdr, MsgHdrMut, Protocol, Socket, Type};
 use tappers::Tun;
 use tracing_subscriber::EnvFilter;
-use tracing::{info, trace};
-use wire::{ip_proto, FromBytes, Ip6Header, UdpHeader};
+use tracing::{info, trace, debug};
+use wire::{ip_proto, DcepOpenHeader, FromBytes, IntoBytes, Ip6Header, UdpHeader};
 use tappers::Interface;
 use stun::{Stun, Class, Method, attr::*, attr::integrity::Integrity, attr::parse::AttrIter as _};
 use std::net::SocketAddr;
 use slab::Slab;
 use core::ptr::from_ref;
-use core::ffi::c_void;
+use core::ffi::{c_void, c_int, c_uint};
 
 #[derive(Parser)]
 #[command(version, about)]
@@ -79,6 +80,87 @@ fn to_base62(fingerprint: &mut [u8]) -> String {
 	}
 
 	ret
+}
+
+struct RcvInfo {
+	inner: libc::sctp_rcvinfo,
+}
+impl RcvInfo {
+	fn from_control(control: &mut Vec<u8>) -> Option<Self> {
+		let msghdr = libc::msghdr {
+			msg_name: null_mut(),
+			msg_namelen: 0,
+			msg_iov: null_mut(),
+			msg_iovlen: 0,
+			msg_control: control.as_mut_ptr().cast::<c_void>(),
+			msg_controllen: control.len(),
+			msg_flags: 0
+		};
+		let mut cmsg = unsafe { libc::CMSG_FIRSTHDR(&msghdr) };
+		while let Some(mut ptr) = NonNull::new(cmsg) {
+			let libc::cmsghdr {
+				cmsg_level,
+				cmsg_type,
+				..
+			} = unsafe { ptr.read_unaligned() };
+			trace!(?cmsg_level, ?cmsg_type, "CMSG");
+			match (cmsg_level, cmsg_type) {
+				(libc::IPPROTO_SCTP, libc::SCTP_RCVINFO) => {
+					let inner = unsafe { libc::CMSG_DATA(ptr.as_mut()).cast::<libc::sctp_rcvinfo>().read_unaligned() };
+					return Some(Self { inner });
+				}
+				_ => {}
+			}
+			cmsg = unsafe { libc::CMSG_NXTHDR(&msghdr, cmsg) };
+		}
+		None
+	}
+}
+
+struct SndInfo {
+	inner: libc::sctp_sndinfo,
+	pr_info: Option<libc::sctp_prinfo>,
+}
+impl SndInfo {
+	fn to_control(&self, control: &mut Vec<u8>) {
+		let len = unsafe {
+			libc::CMSG_SPACE(size_of::<libc::sctp_sndinfo>() as c_uint) +
+			self.pr_info.map_or(0, |_| libc::CMSG_SPACE(size_of::<libc::sctp_prinfo>() as c_uint))
+		};
+		control.clear();
+		control.reserve(len as usize);
+		let msghdr = libc::msghdr {
+			msg_name: null_mut(),
+			msg_namelen: 0,
+			msg_iov: null_mut(),
+			msg_iovlen: 0,
+			msg_control: control.as_mut_ptr().cast::<c_void>(),
+			msg_controllen: control.capacity(),
+			msg_flags: 0
+		};
+		unsafe {
+			let cmsg = libc::CMSG_FIRSTHDR(&msghdr);
+			write_unaligned(cmsg, libc::cmsghdr {
+				cmsg_level: libc::IPPROTO_SCTP,
+				cmsg_type: libc::SCTP_SNDINFO,
+				cmsg_len: libc::CMSG_LEN(size_of::<libc::sctp_sndinfo>() as c_uint) as usize
+			});
+			write_unaligned::<libc::sctp_sndinfo>(libc::CMSG_DATA(cmsg).cast(), self.inner);
+
+			if let Some(pr_info) = self.pr_info {
+				let cmsg = libc::CMSG_NXTHDR(&msghdr, cmsg);
+				write_unaligned(cmsg, libc::cmsghdr {
+					cmsg_level: libc::IPPROTO_SCTP,
+					cmsg_type: libc::SCTP_PRINFO,
+					cmsg_len: libc::CMSG_LEN(size_of::<libc::sctp_prinfo>() as c_uint) as usize
+				});
+				write_unaligned::<libc::sctp_prinfo>(libc::CMSG_DATA(cmsg).cast(), pr_info);
+			}
+
+			// Mark the control data as initialized (VERY IMPORTANT, because the vec length will be used as the msg_controllen later!)
+			control.set_len(len as usize);
+		}
+	}
 }
 
 
@@ -262,6 +344,10 @@ fn main() -> Result<Never> {
 	let send_buffer = Rc::new(RefCell::new([0; BUFFER_LENGTH]));
 	let mut decrypted = [0; BUFFER_LENGTH];
 
+	// TODO: Figure out buffer lengths and stuff.
+	let mut sctp_buffer = Vec::with_capacity(4096);
+	let mut sctp_control = Vec::with_capacity(2048);
+
 	// Connection state
 	let mut cids: BTreeMap<SocketAddrV6, usize> = BTreeMap::new();
 	let mut connections: Slab<Context<Wrapper>> = Slab::new();
@@ -275,7 +361,7 @@ fn main() -> Result<Never> {
 	loop {
 		// Periodically Cleanup the connections
 		if last_cleanup.elapsed() > cleanup {
-			cids.retain(|cid, key| {
+			cids.retain(|_cid, key| {
 				let Some(context) = connections.get_mut(*key) else {
 					return false;
 				};
@@ -287,7 +373,7 @@ fn main() -> Result<Never> {
 				}
 				connections.remove(*key);
 
-				true
+				false
 			});
 			last_cleanup = Instant::now();
 		}
@@ -313,9 +399,28 @@ fn main() -> Result<Never> {
 								let Wrapper { sctp, .. } = context.io_mut().unwrap();
 								let Some(socket) = sctp else { continue };
 
+								SndInfo {
+									pr_info: Some(libc::sctp_prinfo {
+										pr_policy: libc::SCTP_PR_SCTP_RTX as u16,
+										pr_value: 0,
+									}),
+									inner: libc::sctp_sndinfo {
+										snd_sid: 1,
+										snd_flags: libc::SCTP_UNORDERED as u16,
+										snd_ppid: u32::to_be(53),
+										snd_context: 0,
+										snd_assoc_id: 0,
+									},
+								}.to_control(&mut sctp_control);
+
 								// Relay the IPv6 packet as SCTP data
 								trace!(packet = &buffer[..length], ?index, "In");
-								let _ = socket.write(&buffer[..length]);
+								let iovec = [IoSlice::new(&buffer[..length])];
+								let msg = MsgHdr::new()
+									.with_buffers(&iovec)
+									.with_control(&sctp_control);
+
+								let _ = socket.sendmsg(&msg, libc::MSG_EOR);
 							}
 							// Plaintext SCTP
 							(Ok(IndexIp { proto: 0x03, index, .. }), ip_proto::SCTP, 12.., _) => {
@@ -548,72 +653,106 @@ fn main() -> Result<Never> {
 						let pid = to_base62(&mut fingerprint);
 						trace!(?pid, ?index, ?fingerprint, ?cert, "SCTP Establish");
 
-						// Configure Unreliable (zero retransmit)
-						// let pr_info = libc::sctp_prinfo {
-						// 	pr_policy: libc::SCTP_PR_SCTP_RTX as u16,
-						// 	pr_value: 0
-						// };
-						// if 0 != unsafe { libc::setsockopt(
-						// 	assoc.as_raw_fd(),
-						// 	libc::IPPROTO_SCTP,
-						// 	libc::SCTP_DEFAULT_PRINFO,
-						// 	from_ref(&pr_info).cast::<c_void>(),
-						// 	size_of_val(&pr_info) as libc::socklen_t
-						// ) } {
-						// 	continue
-						// }
-
-						// Configure stream 1, unordered, and a binary data type
-						let snd_info = libc::sctp_sndinfo {
-							snd_sid: 1,
-							snd_flags: libc::SCTP_UNORDERED as u16,
-							snd_ppid: 53_u32.to_be() /* WebRTC Binary PPID */,
-							snd_context: 0,
-							snd_assoc_id: 0,
-						};
+						// Enable receiving SCTP message info in the control buffer (ppid, stream id, etc.)
+						let enable: c_int = 1;
 						if 0 != unsafe { libc::setsockopt(
 							socket.as_raw_fd(),
 							libc::IPPROTO_SCTP,
-							libc::SCTP_DEFAULT_SNDINFO,
-							from_ref(&snd_info).cast::<c_void>(),
-							size_of_val(&snd_info) as libc::socklen_t
-						) } {
-							continue
+							libc::SCTP_RECVRCVINFO,
+							from_ref(&enable).cast::<c_void>(),
+							size_of_val(&enable) as libc::socklen_t
+						)} {
+							debug!("FAILED SOCKOPT");
+							continue;
 						}
 						socket.set_nonblocking(true)?;
+
+						// Open a WebRTC DataChannel using stream 1 with unreliable, unordered semantics, label = your allocated IP, protocol is IP6
+						SndInfo {
+							pr_info: None,
+							inner: libc::sctp_sndinfo {
+								snd_sid: 1,
+								snd_flags: 0,
+								snd_ppid: u32::to_be(50),
+								snd_context: 0,
+								snd_assoc_id: 0,
+							},
+						}.to_control(&mut sctp_control);
+
+						// Relay the IPv6 packet as SCTP data
+						let label = format!("{}", Ipv6Addr::from(&IndexIp { proto: 0x04, site: our_site, index }));
+						let protocol = "IPv6";
+						let dcep_header = DcepOpenHeader {
+							msg_typ: 0x03 /* DCEP_CHANNEL_OPEN */,
+							channel_typ: 0x81 /* CHANNEL_TYPE_PARTIAL_RELIABLE_REXMIT_UNORDERED */,
+							priority: 1024.into() /* extra high */,
+							reliability_parameter: 0.into(),
+							label_len: (label.len() as u16).into(),
+							protocol_len: (protocol.len() as u16).into()
+						};
+						let dcep = [
+							IoSlice::new(dcep_header.as_bytes()),
+							IoSlice::new(label.as_bytes()),
+							IoSlice::new(protocol.as_bytes()),
+						];
+
+						let msg = MsgHdr::new()
+							.with_buffers(&dcep)
+							.with_control(&sctp_control);
+
+						let res = socket.sendmsg(&msg, libc::MSG_EOR);
+						trace!(?res, "DCEP SEND");
+
 						poll.registry().register(&mut SourceFd(&socket.as_raw_fd()), Token(key), Interest::READABLE)?;
 						let wrapper = context.io_mut().unwrap();
 						wrapper.sctp = Some(socket);
 					}
 					// Data available on a split-off SCTP Socket
 					Token(key) => {
-						let context = connections.get(key).unwrap();
-						let Some(Wrapper { sctp: Some(socket), .. }) = context.io() else { unreachable!() };
-						let mut socket = socket;
+						let context = connections.get_mut(key).unwrap();
+						let Some(Wrapper { sctp, .. }) = context.io_mut() else { unreachable!() };
+						let Some(socket) = sctp.as_ref() else { unreachable!() };
 
-						let mut buffer = recv_buffer.borrow_mut();
-						let Ok(length) = socket.read(buffer.as_mut_slice()) else { break };
+						sctp_buffer.clear();
+						sctp_control.clear();
 
-						trace!(?length, "VPN Packet");
-						let (ip, _rest) = Ip6Header::mut_from_prefix(buffer.as_mut_slice()).unwrap();
+						let mut iov = [MaybeUninitSlice::new(sctp_buffer.spare_capacity_mut())];
+						let mut msg = MsgHdrMut::new()
+							.with_buffers(iov.as_mut_slice())
+							.with_control(sctp_control.spare_capacity_mut());
+						let Ok(length) = socket.recvmsg(&mut msg, 0) else { break };
+						let control_len = msg.control_len();
+
+						if msg.flags().is_truncated() { continue }
+						if !msg.flags().is_end_of_record() { continue }
+
+						// Mark data as initialized
+						unsafe {
+							sctp_buffer.set_len(length);
+							sctp_control.set_len(control_len);
+						}
+						trace!(?sctp_buffer, ?sctp_control, "SCTP MSG");
+
+						let Some(RcvInfo { inner: libc::sctp_rcvinfo {
+							rcv_sid: sid,
+							rcv_ppid: ppid,
+							..
+						} }) = RcvInfo::from_control(&mut sctp_control) else { continue };
+						trace!(?sid, ?ppid, ?length, "DataChannel Message");
+
+						// Currently only handle Binary messages on stream 1 (Our VPN channel)
+						if sid != 1 || ppid != u32::to_be(53) { continue }
+
+						let Ok((ip, _rest)) = Ip6Header::mut_from_prefix(sctp_buffer.as_mut_slice()) else {
+							continue
+						};
 						if ip.flags.get() >> 28 != 6 { continue }
 						if ip.len() != length { continue }
 						let exp_src = Ipv6Addr::from(&IndexIp { proto: 0x04, site: our_site, index: key as u64}).octets();
-
-						// TODO: Just drop the packet here, but send a reliable JSON configuration message containing your assigned ip address when we first split-off the SCTP association.
-						if ip.src != exp_src {
-							ip.dst = exp_src;
-							ip.src = [0; 16];
-							ip.payload_length.set(0);
-							ip.next_header = 0xff;
-							let len = ip.len();
-
-							trace!(packet = &buffer[..len], "Discover");
-							socket.write(&buffer[..len])?;
-							continue
-						}
-						trace!(packet = &buffer[..length], "Out");
-						let _ = network.send(&buffer[..length]);
+						// Verify that the src ip is what we've allocated to this client:
+						if ip.src != exp_src { continue };
+						trace!(packet = &sctp_buffer[..length], "Out");
+						let _ = network.send(&sctp_buffer[..length]);
 					},
 				}
 			}

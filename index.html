@@ -56,7 +56,7 @@ function log_everything(conn, label = conn.pid, dc = conn.dc) {
 import { Ip6 } from './src/ip6.js';
 
 const h = new RTCPeerConnection(config);
-const dc = h.createDataChannel('', {negotiated: true, id: 1});
+const dc = h.createDataChannel('', {negotiated: true, id: 0});
 log_everything(h, 'h', dc);
 await h.setRemoteDescription({type:'offer',sdp:`v=0
 o=- 42 2 IN IP4 0.0.0.0
@@ -77,10 +77,10 @@ await h.setLocalDescription();
 await h.addIceCandidate(hosted());
 console.log(h.localDescription.type, h.localDescription.sdp);
 await state({ 'open': dc });
-const buffer = new ArrayBuffer(40);
-let packet = new Ip6(buffer);
-packet.version = 6;
-dc.send(buffer);
+// const buffer = new ArrayBuffer(40);
+// let packet = new Ip6(buffer);
+// packet.version = 6;
+// dc.send(buffer);
 </script>
 
 <!-- Dissolved a<->b -->
