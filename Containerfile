@@ -41,9 +41,8 @@ ADD cfg/cert.pem /opt/masquerade/
 WORKDIR /src/masquerade
 COPY . .
 RUN cargo install --root /opt/masquerade --path turn-gateway; \
-	cargo install --root /opt/masquerade --path dtls-proxy; \
-	cargo install --root /opt/masquerade --path sctp-vpn
-RUN systemctl enable turn-gateway.service dtls-proxy.service sctp-vpn.service
+	cargo install --root /opt/masquerade --path hosted
+RUN systemctl enable turn-gateway.service hosted.service
 
 # TURN
 EXPOSE 3478/udp

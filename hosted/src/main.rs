@@ -41,7 +41,7 @@ struct Args {
 	#[arg(long, short, default_value = "cert.pem")]
 	cert_file: String,
 
-	#[arg(long, short, default_value = "[fd00:1::]:5001")]
+	#[arg(long, short, default_value = "[fd00:1::]:5000")]
 	sctp: String,
 
 	#[arg(long, short)]

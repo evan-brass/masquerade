@@ -1,16 +1,18 @@
 [package]
-name = "sctp-vpn"
+name = "hosted"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-mio = { version = "1.0.4", features = ["os-ext", "os-poll"] }
 clap = { version = "4.5.40", features = ["derive"] }
 eyre = "0.6.12"
+libc = "0.2.174"
+mbedtls = { version = "0.13.2", features = ["debug", "ssl"] }
+mio = { version = "1.0.4", features = ["os-ext"] }
+slab = "0.4.10"
+socket2 = { version = "0.6.0", features = ["all"] }
+stun = { version = "0.1.0", path = "../stun" }
 tappers = "0.4.2"
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
 wire = { path = "../wire" }
-socket2 = { version = "0.6.0", features = ["all"] }
-libc = "0.2.174"
-slab = "0.4.10"

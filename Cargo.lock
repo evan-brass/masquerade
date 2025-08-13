@@ -300,24 +300,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "dtls-proxy"
-version = "0.1.0"
-dependencies = [
- "clap",
- "eyre",
- "libc",
- "mbedtls",
- "mio",
- "slab",
- "socket2",
- "stun",
- "tappers",
- "tracing",
- "tracing-subscriber",
- "wire",
-]
-
-[[package]]
 name = "either"
 version = "1.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -393,6 +375,24 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "589533453244b0995c858700322199b2becb13b627df2851f64a2775d024abcf"
 dependencies = [
  "windows-sys",
+]
+
+[[package]]
+name = "hosted"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "eyre",
+ "libc",
+ "mbedtls",
+ "mio",
+ "slab",
+ "socket2",
+ "stun",
+ "tappers",
+ "tracing",
+ "tracing-subscriber",
+ "wire",
 ]
 
 [[package]]
@@ -811,22 +811,6 @@ name = "rustversion"
 version = "1.0.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a0d197bd2c9dc6e53b84da9556a69ba4cdfab8619eb41a8bd1cc2027a0f6b1d"
-
-[[package]]
-name = "sctp-vpn"
-version = "0.1.0"
-dependencies = [
- "clap",
- "eyre",
- "libc",
- "mio",
- "slab",
- "socket2",
- "tappers",
- "tracing",
- "tracing-subscriber",
- "wire",
-]
 
 [[package]]
 name = "semver"

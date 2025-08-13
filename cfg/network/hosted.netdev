@@ -1,5 +1,5 @@
 [NetDev]
-Name=sctp
+Name=hosted
 Kind=tun
 
 [Tun]
