@@ -1,12 +1,14 @@
 use std::io::{Read, Write};
+use std::net::SocketAddrV6;
 use std::{
 	io::{self, BufWriter, ErrorKind},
-	net::{IpAddr, Shutdown, SocketAddr},
+	net::{Shutdown, SocketAddr},
 	os::fd::AsRawFd,
 };
 
 use clap::Parser;
 use eyre::Result;
+use masquerade::ip::IndexIp;
 use mio::{
 	Events, Interest, Poll, Token,
 	event::Event,
@@ -82,27 +84,6 @@ impl Conn {
 	}
 }
 
-// We assign a link-local ip for each tcp stream u64 <-> Link local ip
-fn to_ip(site: u16, index: u64) -> IpAddr {
-	let mut octets = [0xfd, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-	octets[2..4].copy_from_slice(&site.to_be_bytes());
-	octets[8..].copy_from_slice(&index.to_be_bytes());
-	IpAddr::from(octets)
-}
-fn from_ip(ip: IpAddr) -> Option<(u16, u64)> {
-	let IpAddr::V6(ip6) = ip else { return None };
-	let octets = ip6.octets();
-	if octets[0..2] != [0xfd, 0x01] {
-		return None;
-	}
-	let site = u16::from_be_bytes(octets[2..4].try_into().unwrap());
-	if octets[4..8] != [0, 0, 0, 0] {
-		return None;
-	}
-	let index = u64::from_be_bytes(octets[8..].try_into().unwrap());
-	Some((site, index))
-}
-
 fn main() -> Result<Never> {
 	// Enable logging
 	tracing_subscriber::fmt()
@@ -159,7 +140,7 @@ fn main() -> Result<Never> {
 						continue;
 					}
 					UDP => {
-						let Ok((len, sender)) = socket.recv_from(&mut buffer) else {
+						let Ok((len, SocketAddr::V6(sender))) = socket.recv_from(&mut buffer) else {
 							break;
 						};
 						let msg = Stun {
@@ -182,9 +163,11 @@ fn main() -> Result<Never> {
 						};
 						match stream.handle(e, &mut buffer) {
 							Ok(msg) => {
-								let sender = SocketAddr::new(
-									to_ip(args.site, index as u64),
+								let sender = SocketAddrV6::new(
+									(&IndexIp { proto: 0x01, site: args.site, index: index as u64 }).into(),
 									stream.canonical.port(),
+									0,
+									0
 								);
 								server.handle_stun(msg, sender)
 							}
@@ -201,18 +184,16 @@ fn main() -> Result<Never> {
 				};
 				match action {
 					Some(Action::SendTo { length, receiver }) => {
-						if let Some((site, index)) = from_ip(receiver.ip()) {
-							if args.site == site {
-								if let Some(Conn { stream, .. }) = streams.get_mut(index as usize) {
-									let spare_capacity = stream.capacity() - stream.buffer().len();
-									if length <= spare_capacity {
-										stream.write_all(&buffer[..length]).unwrap();
-										let _ = stream.flush();
-									}
+						if let Ok(IndexIp{ proto: 0x01, index, .. }) = IndexIp::try_from(receiver.ip()) {
+							if let Some(Conn { stream, .. }) = streams.get_mut(index as usize) {
+								let spare_capacity = stream.capacity() - stream.buffer().len();
+								if length <= spare_capacity {
+									stream.write_all(&buffer[..length]).unwrap();
+									let _ = stream.flush();
 								}
 							}
 						} else {
-							let _ = socket.send_to(&buffer[..length], receiver);
+							let _ = socket.send_to(&buffer[..length], receiver.into());
 						}
 					}
 					Some(Action::Forward { length }) => {

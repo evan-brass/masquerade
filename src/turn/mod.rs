@@ -1,4 +1,4 @@
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, SocketAddrV6, SocketAddr};
 
 use rand::{RngCore, random, rng};
 use crate::stun::{
@@ -11,12 +11,12 @@ pub struct Server {}
 
 #[derive(Debug, Clone, Copy)]
 pub enum Action {
-	SendTo { length: usize, receiver: SocketAddr },
+	SendTo { length: usize, receiver: SocketAddrV6 },
 	Forward { length: usize },
 }
 
 impl Server {
-	pub fn handle_stun(&mut self, mut msg: Stun<&mut [u8]>, sender: SocketAddr) -> Option<Action> {
+	pub fn handle_stun(&mut self, mut msg: Stun<&mut [u8]>, sender: SocketAddrV6) -> Option<Action> {
 		// A few proto checks to filter some false STUN traffic I saw
 		if msg.cookie() != MAGIC_COOKIE {
 			return None;
@@ -135,7 +135,7 @@ impl Server {
 				msg.set_length(0);
 				msg.set_class(Class::Success);
 				msg.append::<XOR_MAPPED_ADDRESS, _>(&canonical).unwrap();
-				msg.append::<XOR_RELAYED_ADDRESS, SocketAddr>(&sender)
+				msg.append::<XOR_RELAYED_ADDRESS, SocketAddr>(&sender.into())
 					.unwrap();
 				msg.append::<LIFETIME, _>(&lifetime.unwrap_or(1000))
 					.unwrap();
@@ -286,7 +286,7 @@ impl Server {
 						inner.set_length(0);
 						inner.set_class(Class::Success);
 						inner
-							.append::<XOR_MAPPED_ADDRESS, SocketAddr>(&sender)
+							.append::<XOR_MAPPED_ADDRESS, SocketAddr>(&sender.into())
 							.unwrap();
 						inner
 							.append::<MESSAGE_INTEGRITY, _>(&ice_key.as_slice())
@@ -318,9 +318,7 @@ impl Server {
 					let IpAddr::V6(dst_addr) = peer.ip() else {
 						return None;
 					};
-					let IpAddr::V6(src_addr) = sender.ip() else {
-						return None;
-					};
+					let src_addr = sender.ip();
 					let length = len as u16 + 8;
 
 					// IP6 + UDP = 40 + 8 = 48 = STUN Data Indication! Perfect.  No copy/shift needed.
@@ -364,8 +362,8 @@ impl Server {
 					return None
 				};
 				let data_len = udp.length.get() - 8;
-				let sender = SocketAddr::new(ip.src.into(), udp.src_port.get());
-				let receiver = SocketAddr::new(ip.dst.into(), udp.dst_port.get());
+				let sender = SocketAddrV6::new(ip.src.into(), udp.src_port.get(), 0, 0);
+				let receiver = SocketAddrV6::new(ip.dst.into(), udp.dst_port.get(), 0, 0);
 
 				// Create a TURN message from this network message:
 				let mut msg = Stun { buffer };
@@ -374,7 +372,7 @@ impl Server {
 				msg.set_length(0);
 				msg.set_cookie(MAGIC_COOKIE);
 				rng().fill_bytes(msg.set_txid());
-				msg.append::<XOR_PEER_ADDRESS, _>(&sender).unwrap();
+				msg.append::<XOR_PEER_ADDRESS, SocketAddr>(&sender.into()).unwrap();
 
 				// Fill a STUN DATA attribute
 				let data = StunAttrHeader::mut_from_bytes(&mut msg.buffer[44..48]).unwrap();
