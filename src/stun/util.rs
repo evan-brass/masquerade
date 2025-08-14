@@ -53,7 +53,7 @@ macro_rules! declare_fields {
 		}
 	};
 	($name:ident, $offset:expr, $align:literal, $len_offset:expr, $len_field:ident, ...$typ:ident,) => {
-		impl<'i, B> Iterator for crate::util::VarIter<'i, $name<B>, $typ<&'i [u8]>> {
+		impl<'i, B> Iterator for crate::stun::util::VarIter<'i, $name<B>, $typ<&'i [u8]>> {
 			type Item = $typ<&'i [u8]>;
 			fn next(&mut self) -> Option<Self::Item> {
 				if self.buffer.len() < $typ::<&'i [u8]>::MIN_LEN { return None }
@@ -72,8 +72,8 @@ macro_rules! declare_fields {
 		}
 		paste::paste! {
 			impl<'i, B: ::core::borrow::Borrow<[u8]>> $name<B> {
-				pub fn [<$typ:lower s>](&self) -> crate::util::VarIter<'_, $name<B>, $typ<&[u8]>> {
-					crate::util::VarIter::new(&self.buffer.borrow()[$name::<B>::MIN_LEN..][..self.len()])
+				pub fn [<$typ:lower s>](&self) -> crate::stun::util::VarIter<'_, $name<B>, $typ<&[u8]>> {
+					crate::stun::util::VarIter::new(&self.buffer.borrow()[$name::<B>::MIN_LEN..][..self.len()])
 				}
 			}
 		}

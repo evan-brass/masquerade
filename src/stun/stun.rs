@@ -1,6 +1,6 @@
 use attr::Prefix;
 
-use crate::*;
+use crate::stun::*;
 use core::borrow::{Borrow, BorrowMut};
 
 impl<B: Borrow<[u8]>> Stun<B> {

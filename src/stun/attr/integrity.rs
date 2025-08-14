@@ -32,7 +32,6 @@ impl<'i> Attr<'i, MESSAGE_INTEGRITY_SHA256> for Integrity<'i, 32> {
 	}
 }
 
-#[cfg(feature = "integrity")]
 mod mbedtls_integrity {
 	use hmac::{digest::FixedOutput as _, Hmac, Mac};
 	use sha1::Sha1;

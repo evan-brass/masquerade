@@ -40,8 +40,7 @@ ADD cfg/cert.pem /opt/masquerade/
 
 WORKDIR /src/masquerade
 COPY . .
-RUN cargo install --root /opt/masquerade --path turn-gateway; \
-	cargo install --root /opt/masquerade --path hosted
+RUN cargo install --root /opt/masquerade --path .
 RUN systemctl enable turn-gateway.service hosted.service
 
 # TURN

@@ -15,7 +15,6 @@ pub trait AttrIter<'i>: Iterator<Item = (Prefix<'i>, u16, &'i [u8])> + Sized {
 		AttrParser::new::<'i, T, A>(self, |prefix, value| *dest = A::decode(prefix, value).ok())
 	}
 
-	#[cfg(feature = "std")]
 	fn collect_unknown_all(self) -> std::vec::Vec<u16> {
 		self.map(|(_, typ, _)| typ)
 			.filter(|t| comprehension_required(*t))

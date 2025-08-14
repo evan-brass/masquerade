@@ -1,8 +1,8 @@
 //! The STUN protocol
 //! We only implement part of it
 
-use crate::attr::values::{sockaddr_attr, str_attr};
-use crate::attr::{Attr, AttrEnc, Prefix, ERROR_CODE, UNKNOWN_ATTRIBUTES};
+use super::attr::values::{sockaddr_attr, str_attr};
+use super::attr::{Attr, AttrEnc, Prefix, ERROR_CODE, UNKNOWN_ATTRIBUTES};
 
 sockaddr_attr!(MAPPED_ADDRESS, false);
 str_attr!(USERNAME);
@@ -37,9 +37,8 @@ impl<const N: usize> AttrEnc<UNKNOWN_ATTRIBUTES> for [u16; N] {
 	}
 }
 
-#[cfg(feature = "fingerprint")]
 mod fingerprint {
-	use crate::attr::{Attr, AttrEnc, FINGERPRINT};
+	use crate::stun::attr::{Attr, AttrEnc, FINGERPRINT};
 	use crc::Crc;
 
 	pub struct BadFingerprint;
@@ -49,7 +48,7 @@ mod fingerprint {
 
 	impl Attr<'_, FINGERPRINT> for () {
 		type Error = BadFingerprint;
-		fn decode(prefix: crate::attr::Prefix, value: &[u8]) -> Result<Self, Self::Error> {
+		fn decode(prefix: super::Prefix, value: &[u8]) -> Result<Self, Self::Error> {
 			let actual = u32::from_be_bytes(value.try_into().map_err(|_| BadFingerprint)?);
 
 			let mut hasher = CRC.digest();
@@ -67,7 +66,7 @@ mod fingerprint {
 		fn length(&self) -> u16 {
 			4
 		}
-		fn encode(&self, prefix: crate::attr::Prefix, value: &mut [u8]) {
+		fn encode(&self, prefix: crate::stun::attr::Prefix, value: &mut [u8]) {
 			let mut hasher = CRC.digest();
 			prefix.reduce_over_prefix(|s| hasher.update(s));
 			let expected = hasher.finalize() ^ FINGERPRINT_MAGIC;
@@ -82,7 +81,7 @@ pub struct UnexpectedLength;
 // More succinctly, I dislike everything about STUN.
 impl<'i> Attr<'i, ERROR_CODE> for (u16, &'i str) {
 	type Error = UnexpectedLength;
-	fn decode(_: crate::attr::Prefix<'i>, value: &'i [u8]) -> Result<Self, Self::Error> {
+	fn decode(_: crate::stun::attr::Prefix<'i>, value: &'i [u8]) -> Result<Self, Self::Error> {
 		if value.len() < 4 {
 			return Err(UnexpectedLength);
 		}
@@ -99,7 +98,7 @@ impl AttrEnc<ERROR_CODE> for (u16, &str) {
 	fn length(&self) -> u16 {
 		4 + self.1.len() as u16
 	}
-	fn encode(&self, _: crate::attr::Prefix, value: &mut [u8]) {
+	fn encode(&self, _: crate::stun::attr::Prefix, value: &mut [u8]) {
 		assert!(self.0 <= 799); // 3-bits for the error class means 0-7
 		let class = (self.0 / 100) as u8;
 		let number = (self.0 % 100) as u8;

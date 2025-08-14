@@ -1,4 +1,29 @@
-[workspace]
-resolver = "2"
-members = ["hosted", "stun", "turn-gateway", "wire"]
+[package]
+name = "masquerade"
+version = "0.1.0"
+edition = "2024"
 
+[dependencies]
+clap = { version = "4.5.39", features = ["derive"] }
+crc = "3.2.1"
+eyre = "0.6.12"
+hmac = "0.12.1"
+libc = "0.2.174"
+mbedtls = { version = "0.13.2", features = ["debug", "ssl"] }
+md5 = "0.7.0"
+mio = { version = "1.0.4", features = ["net", "os-ext", "os-poll"] }
+paste = "1.0.15"
+rand = "0.9.1"
+sha1 = "0.10.6"
+slab = "0.4.10"
+socket2 = { version = "0.6.0", features = ["all"] }
+tappers = "0.4.2"
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
+zerocopy = { version = "0.8.25", features = ["std", "derive"] }
+
+[[bin]]
+name = "turn-gateway"
+
+[[bin]]
+name = "hosted"

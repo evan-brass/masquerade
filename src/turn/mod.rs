@@ -1,11 +1,11 @@
 use std::net::{IpAddr, SocketAddr};
 
 use rand::{RngCore, random, rng};
-use stun::{
+use crate::stun::{
 	Class, MAGIC_COOKIE, Method, Stun,
 	attr::{integrity::Integrity, parse::AttrIter as _, *},
 };
-use wire::{ip_proto, FromBytes, Ip6Header, StunAttrHeader, UdpHeader};
+use crate::wire::{ip_proto, FromBytes, Ip6Header, StunAttrHeader, UdpHeader};
 
 pub struct Server {}
 

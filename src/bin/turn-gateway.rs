@@ -14,12 +14,11 @@ use mio::{
 	unix::SourceFd,
 };
 use slab::Slab;
-use stun::Stun;
+use masquerade::stun::Stun;
 use tappers::{Interface, Tun};
 use tracing_subscriber::EnvFilter;
 
-mod server;
-use crate::server::{Action, Server};
+use masquerade::turn::{Action, Server};
 
 type Never = core::convert::Infallible;
 

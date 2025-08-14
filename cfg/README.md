@@ -17,12 +17,12 @@ TODO: All of these _Service_:_Site_ should probably be _Site_:_Service_ but I do
 - TCP TURN
 	- fd01:{SITE_ID}::{STREAM_INDEX}/64 -> turn
 - DTLS Contexts
-	- fd02:{RANDOM_DTLS_CONTEXT}/16 -> vpn
+	- fd02:{RANDOM_DTLS_CONTEXT}/16 -> hosted
 		- These must be IP6/UDP/DTLS packets
-	- fd03:{SITE_ID}::{CONTEXT_INDEX}/64 -> vpn
+	- fd03:{SITE_ID}::{CONTEXT_INDEX}/64 -> hosted
 		- These must be IP6/SCTP packets
 - SCTP Associations / Allocated IP addresses
-	- fd04:{SITE_ID}::{CONTEXT_INDEX}/96 -> vpn
+	- fd04:{SITE_ID}::{CONTEXT_INDEX}/96 -> hosted
 		- I'm currently using one-to-one SCTP sockets which are split-off and stored on their DTLS context.
 - Inter-Site communication
 	- fd00::/8 -> site-vlan?

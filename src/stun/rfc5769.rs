@@ -1,6 +1,6 @@
 //! Test Vectors for STUN
 //!
-use crate::*;
+use super::*;
 use attr::{integrity::Integrity, parse::AttrIter};
 // use openssl::{hash::MessageDigest, pkey::PKey, sign::Signer};
 

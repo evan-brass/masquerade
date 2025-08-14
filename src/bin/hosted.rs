@@ -27,13 +27,15 @@ use socket2::{Domain, MaybeUninitSlice, MsgHdr, MsgHdrMut, Protocol, Socket, Typ
 use tappers::Tun;
 use tracing_subscriber::EnvFilter;
 use tracing::{info, trace, debug};
-use wire::{ip_proto, DcepOpenHeader, FromBytes, IntoBytes, Ip6Header, UdpHeader};
+use masquerade::wire::{ip_proto, DcepOpenHeader, FromBytes, IntoBytes, Ip6Header, UdpHeader};
 use tappers::Interface;
-use stun::{Stun, Class, Method, attr::*, attr::integrity::Integrity, attr::parse::AttrIter as _};
+use masquerade::stun::{Stun, Class, Method, attr::*, attr::integrity::Integrity, attr::parse::AttrIter as _};
 use std::net::SocketAddr;
 use slab::Slab;
 use core::ptr::from_ref;
 use core::ffi::{c_void, c_int, c_uint};
+use masquerade::ip::IndexIp;
+use masquerade::base62::to_base62;
 
 #[derive(Parser)]
 #[command(version, about)]
@@ -48,39 +50,6 @@ struct Args {
 	if_name: Option<String>,
 }
 
-const B62_CHARSET: &[char] = &[
-	'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S',
-	'T', 'U', 'V', 'W', 'X', 'Y', 'Z', 'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l',
-	'm', 'n', 'o', 'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z', '0', '1', '2', '3', '4',
-	'5', '6', '7', '8', '9',
-];
-fn to_base62(fingerprint: &mut [u8]) -> String {
-	let mut res = [0; 43];
-	for j in 0..43 {
-		let mut remainder = 0;
-		for i in 0..32 {
-			let v = 256 * remainder + fingerprint[i] as u32;
-			remainder = v % 62;
-			fingerprint[i] = (v / 62) as u8;
-		}
-		res[j] = remainder as u8;
-	}
-	res.reverse();
-
-	let mut ret = String::with_capacity(43);
-
-	for i in res {
-		if ret.is_empty() && i == 0 {
-			continue;
-		}
-		ret.push(B62_CHARSET[i as usize]);
-	}
-	if ret.is_empty() {
-		ret.push('A');
-	}
-
-	ret
-}
 
 struct RcvInfo {
 	inner: libc::sctp_rcvinfo,
@@ -160,39 +129,6 @@ impl SndInfo {
 			// Mark the control data as initialized (VERY IMPORTANT, because the vec length will be used as the msg_controllen later!)
 			control.set_len(len as usize);
 		}
-	}
-}
-
-
-struct IndexIp {
-	proto: u8,
-	site: u16,
-	index: u64,
-}
-impl From<&IndexIp> for Ipv6Addr {
-	fn from(IndexIp { proto, site, index }: &IndexIp) -> Self {
-		let mut octets = [0xfd, *proto, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-		octets[2..4].copy_from_slice(&site.to_be_bytes());
-		octets[8..].copy_from_slice(&index.to_be_bytes());
-		octets.into()
-	}
-}
-impl TryFrom<&Ipv6Addr> for IndexIp {
-	type Error = Ipv6Addr;
-	fn try_from(value: &Ipv6Addr) -> Result<Self, Self::Error> {
-		let octets = value.octets();
-		// The value must be within the private ip6 range of fd00::/8
-		if octets[0] != 0xfd {
-			return Err(*value)
-		}
-		// The value must be within the index range of fd{proto}:{site}::/64
-		if octets[4..8] != [0, 0, 0, 0] {
-			return Err(*value);
-		}
-		let proto = octets[1];
-		let site = u16::from_be_bytes(octets[2..4].try_into().unwrap());
-		let index = u64::from_be_bytes(octets[8..].try_into().unwrap());
-		Ok(Self { proto, site, index })
 	}
 }
 

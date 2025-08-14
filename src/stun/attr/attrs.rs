@@ -1,4 +1,4 @@
-use crate::Stun;
+use crate::stun::Stun;
 use core::borrow::Borrow;
 
 pub struct Attrs<'i> {
