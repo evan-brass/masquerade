@@ -32,15 +32,22 @@ RUN apt update \
 ENV container yes
 CMD ["systemd", "--log-level=debug"]
 
+WORKDIR /src/masquerade
+COPY Cargo.toml Cargo.lock Rustfmt.toml ./
+COPY src ./src
+RUN cargo install \
+		--root /opt/masquerade \
+		--path . \
+	; setcap \
+		'cap_net_bind_service=+ep' \
+		/opt/masquerade/bin/hosted \
+	;
+
 ADD cfg/user.conf /usr/lib/sysusers.d/masquerade.conf
 ADD cfg/network/* /etc/systemd/network/
 ADD cfg/sysctl.conf /etc/sysctl.d/masquerade.conf
 ADD cfg/services/* /lib/systemd/system/
 ADD cfg/cert.pem /opt/masquerade/
-
-WORKDIR /src/masquerade
-COPY . .
-RUN cargo install --root /opt/masquerade --path .
 RUN systemctl enable turn-gateway.service hosted.service
 
 # TURN
