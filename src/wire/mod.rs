@@ -1,3 +1,4 @@
+use bitfield::{bitfield, BitRange, BitRangeMut};
 pub use zerocopy::{big_endian::{U16, U32}, little_endian::{U32 as U32_LE}, FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 
 pub mod ip_proto {
@@ -5,10 +6,33 @@ pub mod ip_proto {
 	pub const SCTP: u8 = 132;
 }
 
+bitfield! {
+	#[repr(transparent)]
+	#[derive(Clone, Copy, KnownLayout, Immutable, Unaligned, FromBytes, IntoBytes)]
+	pub struct Ip6Flags([u8; 4]);
+	no default BitRange;
+	impl Debug;
+	pub u8, version, set_version: 31, 28;
+	pub u8, traffic_class, set_traffic_class: 27, 20;
+	pub u32, flow_label, set_flow_label: 19, 0;
+}
+impl<T> BitRange<T> for Ip6Flags where u32: BitRange<T> {
+	fn bit_range(&self, msb: usize, lsb: usize) -> T {
+		u32::from_be_bytes(self.0).bit_range(msb, lsb)
+	}
+}
+impl<T> BitRangeMut<T> for Ip6Flags where u32: BitRangeMut<T> {
+	fn set_bit_range(&mut self, msb: usize, lsb: usize, value: T) {
+		let mut t = u32::from_be_bytes(self.0);
+		t.set_bit_range(msb, lsb, value);
+		self.0 = t.to_be_bytes();
+	}
+}
+
 #[repr(C)]
 #[derive(Debug, Clone, Copy, KnownLayout, Immutable, Unaligned, FromBytes, IntoBytes)]
 pub struct Ip6Header {
-	pub flags: U32,
+	pub flags: Ip6Flags,
 	pub payload_length: U16,
 	pub next_header: u8,
 	pub hop_limit: u8,

@@ -324,7 +324,9 @@ impl Server {
 					// IP6 + UDP = 40 + 8 = 48 = STUN Data Indication! Perfect.  No copy/shift needed.
 					let (ip, rest) = Ip6Header::mut_from_prefix(&mut msg.buffer).unwrap();
 					let (udp, _) = UdpHeader::mut_from_prefix(rest).unwrap();
-					ip.flags.set(6 << 28);
+					ip.flags.set_version(6);
+					ip.flags.set_traffic_class(0);
+					ip.flags.set_flow_label(0);
 					ip.payload_length.set(length);
 					ip.next_header = ip_proto::UDP;
 					ip.hop_limit = 5;
@@ -349,7 +351,7 @@ impl Server {
 
 	pub fn handle_net(&mut self, buffer: &mut [u8], length: usize) -> Option<Action> {
 		let (ip, rest) = Ip6Header::mut_from_prefix(buffer).unwrap();
-		if ip.flags.get() >> 28 != 6 { return None }
+		if ip.flags.version() != 6 { return None }
 		if ip.len() != length { return None }
 		match ip.next_header {
 			ip_proto::UDP if ip.payload_length.get() > 8 => {

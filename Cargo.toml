@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+bitfield = "0.19.1"
 clap = { version = "4.5.39", features = ["derive"] }
 crc = "3.2.1"
 eyre = "0.6.12"

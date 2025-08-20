@@ -1,7 +1,7 @@
 # turn-gateway
 Binds to `\[::\]:3478/udp`, `\[::\]:3478/tcp`, and to a TUN interface.  Non-blocking, but single threaded.
 
-This is a stateless (except for the `Slab&lt;BuffWriter&lt;TcpStream&gt;&gt;`) bridge between TURN frames and UDP datagrams on the TUN interface.  This service is intended to be horizontally scalable, however this would require all instances/sites to share a pair of IP(4|6) addresses.  TURN Data frames being forwarded over UDP can be emit by any instance, however TURN Data frames being relayed over TCP must be emitted by the correct server holding that TcpStream.  This should be possible by using a VPN between the instances and setting routing rules based on the IP subnets each instance uses for their TcpStream allocations
+This is a stateless (except for the `Slab<BuffWriter<TcpStream>>`) bridge between TURN frames and UDP datagrams on the TUN interface.  This service is intended to be horizontally scalable, however this would require all instances/sites to share a pair of IP(4|6) addresses.  TURN Data frames being forwarded over UDP can be emit by any instance, however TURN Data frames being relayed over TCP must be emitted by the correct server holding that TcpStream.  This should be possible by using a VPN between the instances and setting routing rules based on the IP subnets each instance uses for their TcpStream allocations
 
 ![](../../img/turn-udp.png)
 ![](../../img/turn-mixed.png)

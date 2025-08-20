@@ -156,7 +156,7 @@ impl Io for Wrapper {
 		let would_block = Err(mbedtls::Error::HighLevel(codes::SslWantRead));
 		let Ok(mut buffer) = self.recv_buffer.try_borrow_mut() else { return  would_block };
 		let (ip, rest) = Ip6Header::mut_from_prefix(&mut buffer).unwrap();
-		if (ip.flags.get() >> 28) != 6 { return would_block }
+		if ip.flags.version() != 6 { return would_block }
 		if ip.next_header != ip_proto::UDP { return would_block }
 		if ip.payload_length.get() <= 8 { return would_block }
 
@@ -174,7 +174,9 @@ impl Io for Wrapper {
 		if rest.len() < buf.len() { return Err(mbedtls::Error::HighLevel(codes::SslBufferTooSmall)) }
 		let Some(length) = u16::try_from(buf.len()).ok().and_then(|l| l.checked_add(8)) else { return Err(mbedtls::Error::HighLevel(codes::SslBufferTooSmall)) };
 
-		ip.flags.set(6 << 28);
+		ip.flags.set_version(6);
+		ip.flags.set_traffic_class(0);
+		ip.flags.set_flow_label(0);
 		ip.payload_length.set(length);
 		ip.next_header = ip_proto::UDP;
 		ip.hop_limit = 5;
@@ -325,7 +327,7 @@ fn main() -> Result<Never> {
 						let (ip, rest) = Ip6Header::mut_from_prefix(buffer.as_mut_slice()).unwrap();
 
 						trace!(?ip, "TUN PACKET");
-						if (ip.flags.get() >> 28) != 6 { continue }
+						if ip.flags.version() != 6 { continue }
 						if ip.len() != length { continue }
 
 						match (IndexIp::try_from(&Ipv6Addr::from(ip.dst)), ip.next_header, ip.payload_length.get(), rest[8]) {
@@ -441,7 +443,9 @@ fn main() -> Result<Never> {
 											*send_to = sender;
 
 											let length = u16::try_from(length).unwrap();
-											out_ip.flags.set(6 << 28);
+											out_ip.flags.set_version(6);
+											out_ip.flags.set_traffic_class(0);
+											out_ip.flags.set_flow_label(0);
 											out_ip.payload_length.set(length);
 											out_ip.next_header = ip_proto::SCTP;
 											out_ip.hop_limit = 5;
@@ -563,7 +567,9 @@ fn main() -> Result<Never> {
 								ip.payload_length.set(inner.len() as u16 + 8);
 								udp.length = ip.payload_length;
 								udp.checksum.set(0);
-								ip.flags.set(6 << 28);
+								ip.flags.set_version(6);
+								ip.flags.set_traffic_class(0);
+								ip.flags.set_flow_label(0);
 
 								// Send the packet
 								let length = ip.len();
@@ -682,7 +688,7 @@ fn main() -> Result<Never> {
 						let Ok((ip, _rest)) = Ip6Header::mut_from_prefix(sctp_buffer.as_mut_slice()) else {
 							continue
 						};
-						if ip.flags.get() >> 28 != 6 { continue }
+						if ip.flags.version() != 6 { continue }
 						if ip.len() != length { continue }
 						let exp_src = Ipv6Addr::from(&IndexIp { proto: 0x04, site: our_site, index: key as u64}).octets();
 						// Verify that the src ip is what we've allocated to this client:
