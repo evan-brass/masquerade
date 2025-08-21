@@ -129,3 +129,24 @@ pub struct DnsHeader {
 	pub num_authority: U16,
 	pub num_additional: U16,
 }
+
+#[repr(C)]
+#[derive(Debug, KnownLayout, Immutable, Unaligned, FromBytes, IntoBytes)]
+pub struct Record {
+	pub typ: U16,
+	pub class: U16,
+	pub ttl: U32,
+	pub length: U16,
+}
+
+pub mod dns_type {
+	use super::*;
+
+	pub const A: U16 = U16::new(1);
+	pub const AAAA: U16 = U16::new(28);
+}
+pub mod dns_class {
+	use super::*;
+
+	pub const IN: U16 = U16::new(0x0001);
+}

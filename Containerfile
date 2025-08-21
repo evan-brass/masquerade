@@ -53,3 +53,4 @@ RUN systemctl enable turn-gateway.service hosted.service
 # TURN
 EXPOSE 3478/udp
 EXPOSE 3478/tcp
+EXPOSE 53/udp
