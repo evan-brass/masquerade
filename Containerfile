@@ -7,12 +7,14 @@ RUN apt update \
 	; apt install -y \
 		systemd \
 		udev \
-		nginx \
+		nginx-full \
 		clang \
 		cmake \
 		lksctp-tools \
 		tcpdump \
 		net-tools \
+		certbot \
+		python3-certbot-dns-cloudflare \
 	; systemctl mask \
 		getty.target \
 		dev-hugepages.mount \
@@ -30,7 +32,7 @@ RUN apt update \
 	;
 
 ENV container yes
-CMD ["systemd", "--log-level=debug"]
+CMD ["/lib/systemd/systemd", "--log-level=debug"]
 
 WORKDIR /src/masquerade
 COPY Cargo.toml Cargo.lock Rustfmt.toml ./
@@ -48,9 +50,16 @@ ADD cfg/network/* /etc/systemd/network/
 ADD cfg/sysctl.conf /etc/sysctl.d/masquerade.conf
 ADD cfg/services/* /lib/systemd/system/
 ADD cfg/cert.pem /opt/masquerade/
+ADD cfg/nginx.conf /etc/nginx/
+ADD www/* /usr/share/nginx/html/
 RUN systemctl enable turn-gateway.service hosted.service
+
+VOLUME ["/etc/letsencrypt"]
 
 # TURN
 EXPOSE 3478/udp
 EXPOSE 3478/tcp
+EXPOSE 5349/tcp
 EXPOSE 53/udp
+EXPOSE 80/tcp
+EXPOSE 443/tcp

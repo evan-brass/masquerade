@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+	<title>stun.evan-brass.net</title>
+	<style>
+body {
+	max-width: 80ch;
+	margin: 2em auto;
+	tab-size: 4;
+}
+	</style>
+</head>
+
+<body>
+	<header>
+		<h1>stun.evan-brass.net</h1>
+		<p>This is a free STUN / TURN server</p>
+		<nav>
+			<a href="https://github.com/evan-brass/masquerade">opensource</a>
+		</nav>
+	</header>
+	<main>
+		<h2>How to use</h2>
+		<p>Adjust your WebRTC configuration to include this server:</p>
+		<pre><code id="config" lang="javascript">const config = {
+	iceServers: [{
+		urls: [
+			"turn:stun.evan-brass.net",
+			"turn:stun.evan-brass.net?transport=tcp",
+			"turns:stun.evan-brass.net:443?transport=tcp",
+		],
+		username: "<span id="username">guest</span>",
+		credential: "password"
+	}]
+};</code></pre>
+	</main>
+</body>
+
+</html>
