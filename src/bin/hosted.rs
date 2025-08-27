@@ -29,9 +29,10 @@ use socket2::{Domain, MaybeUninitSlice, MsgHdr, MsgHdrMut, Protocol, Socket, Typ
 use tappers::Tun;
 use tracing_subscriber::EnvFilter;
 use tracing::{info, trace, debug};
-use masquerade::wire::{dns_class, dns_type, ip_proto, DcepOpenHeader, DnsHeader, FromBytes, IntoBytes, Ip6Header, Record, UdpHeader};
+use masquerade::wire::{dns_class, dns_type, ip_proto, DcepOpenHeader, DnsHeader, FromBytes, IntoBytes, Ip6Header, Query, Record, UdpHeader};
 use tappers::Interface;
 use masquerade::stun::{Stun, Class, Method, attr::*, attr::integrity::Integrity, attr::parse::AttrIter as _};
+use zerocopy::big_endian::U16;
 use std::net::SocketAddr;
 use slab::Slab;
 use core::ptr::from_ref;
@@ -344,8 +345,6 @@ fn main() -> Result<Never> {
 						let len = rest[0];
 						let (first, rest) = rest.split_at_mut(len as usize + 1);
 						let Ok(label) = from_utf8(&first[1..][..len as usize]) else { continue };
-						// TODO: using (Rc<str>, usize) in pids is kicking me here.
-						let label: Rc<str> = Rc::from(label);
 
 						// Verify that the remaining labels match our domain
 						// TODO: Use the system hostname or something instead
@@ -354,11 +353,16 @@ fn main() -> Result<Never> {
 						let (actual, rest) = rest.split_at_mut(expected.len());
 						if actual != expected { continue }
 
+						// Read the Query
+						let (query, rest) = Query::mut_from_prefix(rest).unwrap();
+
 						// Verify that the original packet was long enough:
-						let exp_length = size_of::<DnsHeader>() + 1 + len as usize + expected.len() + 4;
+						let exp_length = size_of_val(&header) + 1 + label.len() + expected.len() + size_of_val(&query);
 						if length < exp_length { continue }
 
 						let octets;
+						// TODO: using (Rc<str>, usize) in pids is kicking me here.
+						let label: Rc<str> = Rc::from(label);
 						// Return a random IP for our pid
 						if label.as_ref() == self_pid.as_str() {
 							let mut t: [u8; 16] = random();
@@ -376,9 +380,14 @@ fn main() -> Result<Never> {
 						};
 
 						// Verify that the query was for Ip6 and Internet
+						if query.typ != dns_type::AAAA { continue }
+						if query.class != dns_class::IN { continue }
+
+						// Answer Name is a relative link to query 1
+						let (answer_name, rest) = U16::mut_from_prefix(rest).unwrap();
 						let (record, rest) = Record::mut_from_prefix(rest).unwrap();
 
-						let answer_length = exp_length - 4 + size_of::<Record>() + 16;
+						let answer_length = exp_length + size_of_val(answer_name) + size_of_val(record) + size_of_val(&octets);
 
 						// Turn the Question into an answer and send back
 						header.flags.set_answer(true);
@@ -387,10 +396,13 @@ fn main() -> Result<Never> {
 						header.flags.reserved1(false);
 						header.flags.set_authentic_data(true);
 						header.flags.set_rcode(0);
-						header.num_query.set(0);
+						header.num_query.set(1);
 						header.num_answer.set(1);
 						header.num_authority.set(0);
 						header.num_additional.set(0);
+
+						// Use compressed labels for the answer
+						answer_name.set(0b11_000000_00000000 + 12);
 
 						record.typ = dns_type::AAAA;
 						record.class = dns_class::IN;

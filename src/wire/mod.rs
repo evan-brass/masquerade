@@ -132,6 +132,13 @@ pub struct DnsHeader {
 
 #[repr(C)]
 #[derive(Debug, KnownLayout, Immutable, Unaligned, FromBytes, IntoBytes)]
+pub struct Query {
+	pub typ: U16,
+	pub class: U16,
+}
+
+#[repr(C)]
+#[derive(Debug, KnownLayout, Immutable, Unaligned, FromBytes, IntoBytes)]
 pub struct Record {
 	pub typ: U16,
 	pub class: U16,

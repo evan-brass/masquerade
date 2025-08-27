@@ -1,0 +1,11 @@
+# Minimum dependencies to cross compile aarch64 -> x86_64
+FROM rust
+
+RUN apt update; apt install -y \
+	clang \
+	cmake \
+	gcc-x86-64-linux-gnu
+
+WORKDIR /src/masquerade
+
+CMD ["cargo", "build", "--release", "--target", "x86_64-unknown-linux-gnu"]
