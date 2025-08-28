@@ -24,6 +24,8 @@ use mbedtls::x509::{Certificate, VerifyError};
 use mio::net::UdpSocket;
 use mio::unix::SourceFd;
 use mio::{Events, Interest, Poll, Token};
+use num_bigint::BigUint;
+use num_traits::Num;
 use rand::random;
 use socket2::{Domain, MaybeUninitSlice, MsgHdr, MsgHdrMut, Protocol, Socket, Type};
 use tappers::Tun;
@@ -38,7 +40,8 @@ use slab::Slab;
 use core::ptr::from_ref;
 use core::ffi::{c_void, c_int, c_uint};
 use masquerade::ip::IndexIp;
-use masquerade::base62::to_base62;
+
+type Fingerprint = [u8; 32];
 
 #[derive(Parser)]
 #[command(version, about)]
@@ -48,6 +51,9 @@ struct Args {
 
 	#[arg(long, short, default_value = "[fd00:1::]:5000")]
 	sctp: String,
+
+	#[arg(long, short, default_value = "stun.evan-brass.net.")]
+	hostname: String,
 
 	#[arg(long, short)]
 	if_name: Option<String>,
@@ -152,7 +158,7 @@ struct Wrapper {
 	last_update: Instant,
 
 	// Possible SCTP Socket of the parent DTLS Context
-	sctp: Option<(Socket, Rc<str>)>,
+	sctp: Option<(Socket, Fingerprint)>,
 }
 impl Io for Wrapper {
 	fn recv(&mut self, buf: &mut [u8]) -> mbedtls::Result<usize> {
@@ -230,6 +236,8 @@ fn main() -> Result<Never> {
 	let mut domain = UdpSocket::bind("[::]:53".parse()?)?;
 	poll.registry().register(&mut domain, DNS, Interest::READABLE)?;
 
+	let hostname_labels: Vec<_> = args.hostname.split('.').collect();
+
 	// Parse the destination ip address
 	let sctp_addr = SocketAddrV6::from_str(&args.sctp)?;
 	let IndexIp { site: our_site, .. } = IndexIp::try_from(sctp_addr.ip()).map_err(|_ip| eyre!("sctp address wasn't an indexip"))?;
@@ -261,9 +269,9 @@ fn main() -> Result<Never> {
 	let mut pem = std::fs::read(args.cert_file)?; pem.push(0); // Null terminate the PEM as required by mbedtls
 	let cert = Certificate::from_pem(&pem)?;
 
-	let mut fingerprint = [0; 32];
-	assert_eq!(hash::Md::hash(hash::Type::Sha256, cert.as_der(), &mut fingerprint)?, 32);
-	let self_pid = to_base62(&mut fingerprint);
+	let mut self_fingerprint = [0; 32];
+	assert_eq!(hash::Md::hash(hash::Type::Sha256, cert.as_der(), &mut self_fingerprint)?, 32);
+	let self_pid = BigUint::from_bytes_be(&self_fingerprint).to_str_radix(36);
 	info!(?self_pid, "SELF PID");
 
 	let fullchain = Arc::new(FromIterator::from_iter([cert]));
@@ -297,7 +305,7 @@ fn main() -> Result<Never> {
 	// Connection state
 	let mut cids: BTreeMap<SocketAddrV6, usize> = BTreeMap::new();
 	let mut connections: Slab<Context<Wrapper>> = Slab::new();
-	let mut pids: BTreeSet<(Rc<str>, usize)> = BTreeSet::new();
+	let mut pids: BTreeSet<(Fingerprint, usize)> = BTreeSet::new();
 	// TODO: Keep a map from (src ip, src port) -> dst ip so that we limit each src socket addr to 1 DTLS connection.
 
 	// Cleanup state
@@ -328,7 +336,7 @@ fn main() -> Result<Never> {
 
 		// Handle Events
 		for e in events.into_iter() {
-			loop {
+			'event: loop {
 				match e.token() {
 					DNS => {
 						let mut buffer = recv_buffer.borrow_mut();
@@ -343,35 +351,39 @@ fn main() -> Result<Never> {
 
 						// Read the first label
 						let len = rest[0];
-						let (first, rest) = rest.split_at_mut(len as usize + 1);
-						let Ok(label) = from_utf8(&first[1..][..len as usize]) else { continue };
+						let (first, mut rest) = rest.split_at_mut(len as usize + 1);
+						let Ok(label) = from_utf8(&first[1..]) else { continue };
+						let Ok(mut fingerprint) = BigUint::from_str_radix(label, 36).map(|be| be.to_bytes_le()) else { continue };
+						fingerprint.resize(32, 0);
+						fingerprint.reverse();
+						let fingerprint = <[u8; 32]>::try_from(fingerprint).unwrap();
 
-						// Verify that the remaining labels match our domain
-						// TODO: Use the system hostname or something instead
-						// let expected = b"\x05local\x0Aevan-brass\x03net\x00";
-						let expected = b"\x04stun\x0Aevan-brass\x03net\x00";
-						let (actual, rest) = rest.split_at_mut(expected.len());
-						if actual != expected { continue }
+						// Match against all following labels
+						for exp_label in &hostname_labels {
+							let Some(label_len) = rest.get(0) else { continue 'event };
+							let Some((actual_label, new_rest)) = rest.split_at_mut_checked(*label_len as usize + 1) else { continue 'event };
+							let Ok(actual_label) = from_utf8(&actual_label[1..]) else { continue 'event };
+							rest = new_rest;
+							if !exp_label.eq_ignore_ascii_case(actual_label) { continue 'event }
+						}
 
 						// Read the Query
 						let (query, rest) = Query::mut_from_prefix(rest).unwrap();
 
 						// Verify that the original packet was long enough:
-						let exp_length = size_of_val(&header) + 1 + label.len() + expected.len() + size_of_val(&query);
+						let exp_length = size_of_val(&header) + 1 + label.len() + 1 + args.hostname.len() + size_of_val(&query);
 						if length < exp_length { continue }
 
 						let octets;
-						// TODO: using (Rc<str>, usize) in pids is kicking me here.
-						let label: Rc<str> = Rc::from(label);
 						// Return a random IP for our pid
-						if label.as_ref() == self_pid.as_str() {
+						if fingerprint == self_fingerprint {
 							let mut t: [u8; 16] = random();
 							t[0] = 0xfd;
 							t[1] = 0x02;
 							octets = t;
 						}
 						// Return the allocated ip for the sctp conn with the pid
-						else if let Some((_, key)) = pids.range((label.clone(), 0)..(label, usize::MAX)).next() {
+						else if let Some((_, key)) = pids.range((fingerprint, 0)..(fingerprint, usize::MAX)).next() {
 							octets = Ipv6Addr::from(&IndexIp { proto: 0x04, site: our_site, index: *key as u64 }).octets();
 						}
 						// Currently drop but TODO: send NXDOMAIN?
@@ -687,12 +699,7 @@ fn main() -> Result<Never> {
 						let Some(cert) = cert_list.iter().next() else { continue };
 						let mut fingerprint = [0; 32];
 						assert_eq!(hash::Md::hash(hash::Type::Sha256, cert.as_der(), &mut fingerprint)?, 32);
-						let pid = to_base62(&mut fingerprint);
-						let pid: Rc<str> = pid.into_boxed_str().into();
-						trace!(?pid, ?index, ?fingerprint, ?cert, "SCTP Establish");
-
-						// Map the PID -> our SCTP socket
-						pids.insert((pid.clone(), key));
+						trace!(?index, ?fingerprint, ?cert, "SCTP Establish");
 
 						// Enable receiving SCTP message info in the control buffer (ppid, stream id, etc.)
 						let enable: c_int = 1;
@@ -746,7 +753,11 @@ fn main() -> Result<Never> {
 
 						poll.registry().register(&mut SourceFd(&socket.as_raw_fd()), Token(key), Interest::READABLE)?;
 						let wrapper = context.io_mut().unwrap();
-						wrapper.sctp = Some((socket, pid));
+
+						// Store the pid -> key
+						pids.insert((fingerprint, key));
+						// Store the socket on the context
+						wrapper.sctp = Some((socket, fingerprint));
 					}
 					// Data available on a split-off SCTP Socket
 					Token(key) => {
