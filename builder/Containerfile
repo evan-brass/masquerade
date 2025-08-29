@@ -8,4 +8,6 @@ RUN apt update; apt install -y \
 
 WORKDIR /src/masquerade
 
+ENV RUSTFLAGS='-C linker=x86_64-linux-gnu-gcc'
+
 CMD ["cargo", "build", "--release", "--target", "x86_64-unknown-linux-gnu"]
