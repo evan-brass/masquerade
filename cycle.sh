@@ -1,11 +1,5 @@
 set -ex
-podman build -t masquerade-builder -f builder/Containerfile .
 podman build -t masquerade .
-podman run \
-	--rm \
-	-i \
-	-v ./:/src/masquerade \
-	masquerade-builder
 podman run \
 	--rm \
 	--privileged \

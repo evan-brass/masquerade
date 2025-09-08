@@ -1,12 +1,12 @@
 use std::cell::RefCell;
 use std::collections::btree_map::Entry;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::io::IoSlice;
 use std::net::{Ipv6Addr, SocketAddrV6};
 use std::os::fd::AsRawFd;
 use std::ptr::{null_mut, write_unaligned, NonNull};
 use std::rc::Rc;
-use std::str::{from_utf8, FromStr};
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use eyre::{eyre, Result};
@@ -21,27 +21,21 @@ use mbedtls::ssl::config::{Endpoint, Preset, Transport};
 use mbedtls::ssl::context::Timer;
 use mbedtls::ssl::{Config, Context, CookieContext, Io};
 use mbedtls::x509::{Certificate, VerifyError};
-use mio::net::UdpSocket;
 use mio::unix::SourceFd;
 use mio::{Events, Interest, Poll, Token};
 use num_bigint::BigUint;
-use num_traits::Num;
-use rand::random;
 use socket2::{Domain, MaybeUninitSlice, MsgHdr, MsgHdrMut, Protocol, Socket, Type};
 use tappers::Tun;
 use tracing_subscriber::EnvFilter;
 use tracing::{info, trace, debug};
-use masquerade::wire::{dns_class, dns_type, ip_proto, DcepOpenHeader, DnsHeader, FromBytes, IntoBytes, Ip6Header, Query, Record, UdpHeader};
+use masquerade::wire::{ip_proto, DcepOpenHeader, FromBytes, IntoBytes, Ip6Header, UdpHeader};
 use tappers::Interface;
 use masquerade::stun::{Stun, Class, Method, attr::*, attr::integrity::Integrity, attr::parse::AttrIter as _};
-use zerocopy::big_endian::U16;
 use std::net::SocketAddr;
 use slab::Slab;
 use core::ptr::from_ref;
 use core::ffi::{c_void, c_int, c_uint};
 use masquerade::ip::IndexIp;
-
-type Fingerprint = [u8; 32];
 
 #[derive(Parser)]
 #[command(version, about)]
@@ -158,7 +152,7 @@ struct Wrapper {
 	last_update: Instant,
 
 	// Possible SCTP Socket of the parent DTLS Context
-	sctp: Option<(Socket, Fingerprint)>,
+	sctp: Option<(Socket, String)>,
 }
 impl Io for Wrapper {
 	fn recv(&mut self, buf: &mut [u8]) -> mbedtls::Result<usize> {
@@ -207,7 +201,6 @@ impl Io for Wrapper {
 
 const NET: Token = Token(usize::MAX);
 const SCTP: Token = Token(usize::MAX - 1);
-const DNS: Token = Token(usize::MAX - 2);
 
 fn main() -> Result<Never> {
 	// Enable logging
@@ -231,12 +224,6 @@ fn main() -> Result<Never> {
 	network.set_nonblocking(true)?;
 	poll.registry().register(&mut SourceFd(&network.as_raw_fd()), NET, Interest::READABLE)?;
 	let network = Rc::new(network);
-
-	// Bind our DNS socket
-	let mut domain = UdpSocket::bind("[::]:53".parse()?)?;
-	poll.registry().register(&mut domain, DNS, Interest::READABLE)?;
-
-	let hostname_labels: Vec<_> = args.hostname.split('.').collect();
 
 	// Parse the destination ip address
 	let sctp_addr = SocketAddrV6::from_str(&args.sctp)?;
@@ -305,7 +292,6 @@ fn main() -> Result<Never> {
 	// Connection state
 	let mut cids: BTreeMap<SocketAddrV6, usize> = BTreeMap::new();
 	let mut connections: Slab<Context<Wrapper>> = Slab::new();
-	let mut pids: BTreeSet<(Fingerprint, usize)> = BTreeSet::new();
 	// TODO: Keep a map from (src ip, src port) -> dst ip so that we limit each src socket addr to 1 DTLS connection.
 
 	// Cleanup state
@@ -323,8 +309,8 @@ fn main() -> Result<Never> {
 				let Wrapper { last_update, sctp, .. } = context.io_mut().unwrap();
 				if last_update.elapsed() < timeout { return true }
 
-				if let Some((socket, pid)) = sctp.take() {
-					pids.remove(&(pid, *key));
+				if let Some((socket, _pid)) = sctp.take() {
+					// TODO: nsupdate del
 					poll.registry().deregister(&mut SourceFd(&socket.as_raw_fd())).expect("Failed to deregister SCTP socket during register.");
 				}
 				connections.remove(*key);
@@ -336,95 +322,8 @@ fn main() -> Result<Never> {
 
 		// Handle Events
 		for e in events.into_iter() {
-			'event: loop {
+			loop {
 				match e.token() {
-					DNS => {
-						let mut buffer = recv_buffer.borrow_mut();
-						let Ok((length, sender)) = domain.recv_from(buffer.as_mut_slice()) else { break };
-						let (header, rest) = DnsHeader::mut_from_prefix(buffer.as_mut_slice()).unwrap();
-
-						// Make sure this is a complete query
-						if header.flags.is_answer() { continue }
-						if header.flags.opcode() != 0 { continue }
-						if header.flags.is_truncated() { continue }
-						if header.num_query.get() != 1 { continue }
-
-						// Read the first label
-						let len = rest[0];
-						let (first, mut rest) = rest.split_at_mut(len as usize + 1);
-						let Ok(label) = from_utf8(&first[1..]) else { continue };
-						let Ok(mut fingerprint) = BigUint::from_str_radix(label, 36).map(|be| be.to_bytes_le()) else { continue };
-						fingerprint.resize(32, 0);
-						fingerprint.reverse();
-						let fingerprint = <[u8; 32]>::try_from(fingerprint).unwrap();
-
-						// Match against all following labels
-						for exp_label in &hostname_labels {
-							let Some(label_len) = rest.get(0) else { continue 'event };
-							let Some((actual_label, new_rest)) = rest.split_at_mut_checked(*label_len as usize + 1) else { continue 'event };
-							let Ok(actual_label) = from_utf8(&actual_label[1..]) else { continue 'event };
-							rest = new_rest;
-							if !exp_label.eq_ignore_ascii_case(actual_label) { continue 'event }
-						}
-
-						// Read the Query
-						let (query, rest) = Query::mut_from_prefix(rest).unwrap();
-
-						// Verify that the original packet was long enough:
-						let exp_length = size_of_val(&header) + 1 + label.len() + 1 + args.hostname.len() + size_of_val(&query);
-						if length < exp_length { continue }
-
-						let octets;
-						// Return a random IP for our pid
-						if fingerprint == self_fingerprint {
-							let mut t: [u8; 16] = random();
-							t[0] = 0xfd;
-							t[1] = 0x02;
-							octets = t;
-						}
-						// Return the allocated ip for the sctp conn with the pid
-						else if let Some((_, key)) = pids.range((fingerprint, 0)..(fingerprint, usize::MAX)).next() {
-							octets = Ipv6Addr::from(&IndexIp { proto: 0x04, site: our_site, index: *key as u64 }).octets();
-						}
-						// Currently drop but TODO: send NXDOMAIN?
-						else {
-							continue
-						};
-
-						// Verify that the query was for Ip6 and Internet
-						if query.typ != dns_type::AAAA { continue }
-						if query.class != dns_class::IN { continue }
-
-						// Answer Name is a relative link to query 1
-						let (answer_name, rest) = U16::mut_from_prefix(rest).unwrap();
-						let (record, rest) = Record::mut_from_prefix(rest).unwrap();
-
-						let answer_length = exp_length + size_of_val(answer_name) + size_of_val(record) + size_of_val(&octets);
-
-						// Turn the Question into an answer and send back
-						header.flags.set_answer(true);
-						header.flags.set_authoritative(true);
-						header.flags.set_recursion_available(false);
-						header.flags.reserved1(false);
-						header.flags.set_authentic_data(true);
-						header.flags.set_rcode(0);
-						header.num_query.set(1);
-						header.num_answer.set(1);
-						header.num_authority.set(0);
-						header.num_additional.set(0);
-
-						// Use compressed labels for the answer
-						answer_name.set(0b11_000000_00000000 + 12);
-
-						record.typ = dns_type::AAAA;
-						record.class = dns_class::IN;
-						record.ttl.set(1);
-						record.length.set(16);
-						rest[..16].copy_from_slice(octets.as_slice());
-
-						// Respond
-						let _ = domain.send_to(&buffer[..answer_length], sender);
-					}
 					NET => {
 						// Read a packet from the network interface
 						let mut buffer = recv_buffer.borrow_mut();
@@ -482,8 +381,8 @@ fn main() -> Result<Never> {
 									_ => {
 										let mut context = connections.remove(key);
 										let Wrapper { send_from, sctp, .. } = context.io_mut().unwrap();
-										if let Some((socket, pid)) = sctp.take() {
-											pids.remove(&(pid, key));
+										if let Some((socket, _pid)) = sctp.take() {
+											// TODO: nsupdate delete
 											poll.registry().deregister(&mut SourceFd(&socket.as_raw_fd()))?;
 										}
 										cids.remove(send_from);
@@ -563,8 +462,8 @@ fn main() -> Result<Never> {
 										_ => {
 											let mut context = connections.remove(key);
 											let Wrapper { send_from, sctp, .. } = context.io_mut().unwrap();
-											if let Some((socket, pid)) = sctp.take() {
-												pids.remove(&(pid, key));
+											if let Some((socket, _pid)) = sctp.take() {
+												// TODO: nsupdate delete
 												poll.registry().deregister(&mut SourceFd(&socket.as_raw_fd()))?;
 											}
 											cids.remove(send_from);
@@ -699,7 +598,8 @@ fn main() -> Result<Never> {
 						let Some(cert) = cert_list.iter().next() else { continue };
 						let mut fingerprint = [0; 32];
 						assert_eq!(hash::Md::hash(hash::Type::Sha256, cert.as_der(), &mut fingerprint)?, 32);
-						trace!(?index, ?fingerprint, ?cert, "SCTP Establish");
+						let pid = BigUint::from_bytes_be(&fingerprint).to_str_radix(36);
+						trace!(?index, ?pid, ?cert, "SCTP Establish");
 
 						// Enable receiving SCTP message info in the control buffer (ppid, stream id, etc.)
 						let enable: c_int = 1;
@@ -728,7 +628,8 @@ fn main() -> Result<Never> {
 						}.to_control(&mut sctp_control);
 
 						// Relay the IPv6 packet as SCTP data
-						let label = format!("{}", Ipv6Addr::from(&IndexIp { proto: 0x04, site: our_site, index }));
+						let allocated = Ipv6Addr::from(&IndexIp { proto: 0x04, site: our_site, index });
+						let label = format!("{}", allocated);
 						let protocol = "IPv6";
 						let dcep_header = DcepOpenHeader {
 							msg_typ: 0x03 /* DCEP_CHANNEL_OPEN */,
@@ -755,9 +656,9 @@ fn main() -> Result<Never> {
 						let wrapper = context.io_mut().unwrap();
 
 						// Store the pid -> key
-						pids.insert((fingerprint, key));
+						// TODO: nsupdate add
 						// Store the socket on the context
-						wrapper.sctp = Some((socket, fingerprint));
+						wrapper.sctp = Some((socket, pid));
 					}
 					// Data available on a split-off SCTP Socket
 					Token(key) => {
