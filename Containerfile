@@ -1,15 +1,24 @@
 # I rely on the Kernel SCTP module, so your container runner will need to have that module enabled.
 # For Podman on MacOS, go to Settings -> Resources -> Podman -> More options (⋮) -> Terminal -> `sudo echo "sctp" > /etc/modprobe.d/sctp.conf` then reboot.
 
-FROM rust
+FROM rust AS rust-builder
+RUN apt update \
+	; apt install -y \
+		clang \
+		cmake
+WORKDIR /src
+RUN --mount=type=bind,dst=.,src=.,rw \
+	cargo install \
+		--root /opt/masquerade \
+		--path .
 
+FROM debian AS runner
+COPY --from=rust-builder /opt/masquerade /opt/masquerade
 RUN apt update \
 	; apt install -y \
 		systemd \
 		udev \
 		nginx-full \
-		clang \
-		cmake \
 		lksctp-tools \
 		tcpdump \
 		net-tools \
