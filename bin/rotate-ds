@@ -1,0 +1,5 @@
+#!/bin/sh
+set -ex
+dig @localhost local.evan-brass.net DNSKEY | dnssec-dsfromkey -f - local.evan-brass.net
+read -n 1 -p "update the DS entry then continue" unused
+rndc dnssec -checkds published local.evan-brass.net

@@ -1,0 +1,7 @@
+zone "local.evan-brass.net" {
+	type primary;
+	file "local.evan-brass.net.zone";
+	dnssec-policy default;
+	inline-signing yes;
+	update-policy local;
+};

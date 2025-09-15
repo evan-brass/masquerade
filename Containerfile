@@ -25,6 +25,8 @@ RUN apt update \
 		certbot \
 		python3-certbot-dns-cloudflare \
 		openssh-server \
+		bind9 \
+		bind9-dnsutils \
 	; systemctl mask \
 		getty.target \
 		dev-hugepages.mount \
@@ -62,6 +64,9 @@ ADD cfg/services/* /lib/systemd/system/
 ADD cfg/cert.pem /opt/masquerade/
 ADD cfg/nginx.conf /etc/nginx/
 ADD www/* /usr/share/nginx/html/
+ADD cfg/named.conf.options /etc/bind/
+ADD cfg/named.conf.local /etc/bind/
+ADD cfg/local.evan-brass.net.zone /var/cache/bind/
 RUN systemctl enable turn-gateway.service hosted.service
 
 VOLUME ["/etc/letsencrypt"]
