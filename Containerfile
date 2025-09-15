@@ -15,6 +15,7 @@ RUN apt update \
 		net-tools \
 		certbot \
 		python3-certbot-dns-cloudflare \
+		openssh-server \
 	; systemctl mask \
 		getty.target \
 		dev-hugepages.mount \
