@@ -12,4 +12,5 @@ podman run \
 	-p 53:53/udp \
 	-p 80:80/tcp \
 	-p 443:443/tcp \
+	-p 443:443/udp \
 	masquerade
