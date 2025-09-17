@@ -5,14 +5,14 @@ const config = {
 	iceTransportPolicy: 'relay',
 	iceServers: [{
 		urls: [
-			// 'turn:stun.evan-brass.net',
-			// 'turn:stun.evan-brass.net?transport=tcp',
-			// 'turns:stun.evan-brass.net?transport=tcp',
-			// 'turns:stun.evan-brass.net:443?transport=tcp',
+			'turn:stun.evan-brass.net',
+			'turn:stun.evan-brass.net?transport=tcp',
+			'turns:stun.evan-brass.net?transport=tcp',
+			'turns:stun.evan-brass.net:443?transport=tcp',
 
-			'turn:local.evan-brass.net',
-			'turn:local.evan-brass.net?transport=tcp',
-			'turns:local.evan-brass.net:443?transport=tcp',
+			// 'turn:local.evan-brass.net',
+			// 'turn:local.evan-brass.net?transport=tcp',
+			// 'turns:local.evan-brass.net:443?transport=tcp',
 		],
 		username: 'guest',
 		credential: 'password'
@@ -39,16 +39,20 @@ function state(transitions) {
 </script>
 <script>
 // Log everything.
-function log_everything(conn, label = conn.pid, dc = conn.dc) {
-	const logger = (...args) => console.log(label, ...args);
-	if (dc) {
-		['message', 'open', 'close'].forEach(e => dc.addEventListener(e, logger));
-	}
+function log_everything(conn, label = conn.pid, channel = conn.dc) {
+	const log = console.log.bind(console, label);
+
+	function handle_dc({ channel }) {
+		['message', 'open', 'close'].forEach(e => channel.addEventListener(e, log));
+	};
+	if (channel) handle_dc({ channel });
+	conn.addEventListener('datachannel', handle_dc);
+
 	['connectionState', 'iceConnectionState', 'iceGatheringState', 'signalingState'].forEach(p => {
-		conn.addEventListener(p.toLowerCase() + 'change', () => logger(p, conn[p]));
+		conn.addEventListener(p.toLowerCase() + 'change', ({ target: { [p]: val }}) => log(p, val));
 	});
 	['icecandidate', 'datachannel', 'icecandidateerror', 'negotiationneeded', 'track'].forEach(e => {
-		conn.addEventListener(e, logger);
+		conn.addEventListener(e, log);
 	});
 }
 </script>

@@ -21,6 +21,7 @@ sha1 = "0.10.6"
 slab = "0.4.10"
 socket2 = { version = "0.6.0", features = ["all"] }
 tappers = "0.4.2"
+tempfile = "3.22.0"
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
 zerocopy = { version = "0.8.25", features = ["std", "derive"] }

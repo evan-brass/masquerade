@@ -1,9 +1,10 @@
 use std::cell::RefCell;
 use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
-use std::io::IoSlice;
+use std::io::{IoSlice, Write};
 use std::net::{Ipv6Addr, SocketAddrV6};
 use std::os::fd::AsRawFd;
+use std::process::Command;
 use std::ptr::{null_mut, write_unaligned, NonNull};
 use std::rc::Rc;
 use std::str::FromStr;
@@ -26,6 +27,7 @@ use mio::{Events, Interest, Poll, Token};
 use num_bigint::BigUint;
 use socket2::{Domain, MaybeUninitSlice, MsgHdr, MsgHdrMut, Protocol, Socket, Type};
 use tappers::Tun;
+use tempfile::NamedTempFile;
 use tracing_subscriber::EnvFilter;
 use tracing::{info, trace, debug};
 use masquerade::wire::{ip_proto, DcepOpenHeader, FromBytes, IntoBytes, Ip6Header, UdpHeader};
@@ -299,6 +301,9 @@ fn main() -> Result<Never> {
 	let cleanup = Duration::from_secs(30);
 	let mut last_cleanup = Instant::now();
 
+	// nsupdate stuff
+	let hostname = args.hostname;
+
 	loop {
 		// Periodically Cleanup the connections
 		if last_cleanup.elapsed() > cleanup {
@@ -309,8 +314,29 @@ fn main() -> Result<Never> {
 				let Wrapper { last_update, sctp, .. } = context.io_mut().unwrap();
 				if last_update.elapsed() < timeout { return true }
 
-				if let Some((socket, _pid)) = sctp.take() {
-					// TODO: nsupdate del
+				let allocated = Ipv6Addr::from(&IndexIp { proto: 0x04, site: our_site, index: *key as u64 });
+				if let Some((socket, pid)) = sctp.take() {
+					// nsupdate remove the pid -> allocated record
+					let mut operations_file = NamedTempFile::new().expect("Failed tempfile");
+					// TODO: Add a TXT entry that's "data:application/x-x509-user-cert;base64,<certificate der as base64>"
+					operations_file.write_fmt(format_args!(
+"update delete {pid}.{hostname} 60 AAAA {allocated}
+send
+quit
+")).expect("Failed to write ops file");
+					operations_file.flush()
+						.expect("Failed to flush ops file");
+					let status = Command::new("nsupdate")
+						.arg("-l")
+						.arg(operations_file.path())
+						.status()
+						// TODO: Move expect to an error?
+						.expect("nsupdate failed");
+					trace!(?status, "nsupdate");
+					if !status.success() {
+						panic!("nsupdate failed: {status}");
+					}
+
 					poll.registry().deregister(&mut SourceFd(&socket.as_raw_fd())).expect("Failed to deregister SCTP socket during register.");
 				}
 				connections.remove(*key);
@@ -381,8 +407,27 @@ fn main() -> Result<Never> {
 									_ => {
 										let mut context = connections.remove(key);
 										let Wrapper { send_from, sctp, .. } = context.io_mut().unwrap();
-										if let Some((socket, _pid)) = sctp.take() {
-											// TODO: nsupdate delete
+
+										let allocated = Ipv6Addr::from(&IndexIp { proto: 0x04, site: our_site, index });
+										if let Some((socket, pid)) = sctp.take() {
+											// nsupdate remove the pid -> allocated record
+											let mut operations_file = NamedTempFile::new()?;
+											// TODO: Add a TXT entry that's "data:application/x-x509-user-cert;base64,<certificate der as base64>"
+											operations_file.write_fmt(format_args!(
+"update delete {pid}.{hostname} 60 AAAA {allocated}
+send
+quit
+"))?;
+											operations_file.flush()?;
+											let status = Command::new("nsupdate")
+												.arg("-l")
+												.arg(operations_file.path())
+												.status()?;
+											trace!(?status, "nsupdate");
+											if !status.success() {
+												return Err(eyre!("nsupdate failed: {status}"));
+											}
+
 											poll.registry().deregister(&mut SourceFd(&socket.as_raw_fd()))?;
 										}
 										cids.remove(send_from);
@@ -462,8 +507,26 @@ fn main() -> Result<Never> {
 										_ => {
 											let mut context = connections.remove(key);
 											let Wrapper { send_from, sctp, .. } = context.io_mut().unwrap();
-											if let Some((socket, _pid)) = sctp.take() {
-												// TODO: nsupdate delete
+											let allocated = Ipv6Addr::from(&IndexIp { proto: 0x04, site: our_site, index: key as u64 });
+											if let Some((socket, pid)) = sctp.take() {
+												// nsupdate remove the pid -> allocated record
+												let mut operations_file = NamedTempFile::new()?;
+												// TODO: Add a TXT entry that's "data:application/x-x509-user-cert;base64,<certificate der as base64>"
+												operations_file.write_fmt(format_args!(
+"update delete {pid}.{hostname} 60 AAAA {allocated}
+send
+quit
+"))?;
+												operations_file.flush()?;
+												let status = Command::new("nsupdate")
+													.arg("-l")
+													.arg(operations_file.path())
+													.status()?;
+												trace!(?status, "nsupdate");
+												if !status.success() {
+													return Err(eyre!("nsupdate failed: {status}"));
+												}
+
 												poll.registry().deregister(&mut SourceFd(&socket.as_raw_fd()))?;
 											}
 											cids.remove(send_from);
@@ -655,8 +718,24 @@ fn main() -> Result<Never> {
 						poll.registry().register(&mut SourceFd(&socket.as_raw_fd()), Token(key), Interest::READABLE)?;
 						let wrapper = context.io_mut().unwrap();
 
-						// Store the pid -> key
-						// TODO: nsupdate add
+						// nsupdate the pid -> allocated
+						let mut operations_file = NamedTempFile::new()?;
+						// TODO: Add a TXT entry that's "data:application/x-x509-user-cert;base64,<certificate der as base64>"
+						operations_file.write_fmt(format_args!(
+"update add {pid}.{hostname} 60 AAAA {allocated}
+send
+quit
+"))?;
+						operations_file.flush()?;
+						let status = Command::new("nsupdate")
+							.arg("-l")
+							.arg(operations_file.path())
+							.status()?;
+						trace!(?status, "nsupdate");
+						if !status.success() {
+							return Err(eyre!("nsupdate add failed {status:?}"));
+						}
+
 						// Store the socket on the context
 						wrapper.sctp = Some((socket, pid));
 					}

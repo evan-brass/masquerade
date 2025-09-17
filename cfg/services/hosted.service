@@ -6,10 +6,9 @@ After=network-online.target
 WantedBy=multi-user.target
 
 [Service]
-User=masquerade
 Restart=always
 WorkingDirectory=/opt/masquerade
 Environment=RUST_BACKTRACE="full"
 Environment=RUST_LOG="trace"
 
-ExecStart=/opt/masquerade/bin/hosted -i hosted
+ExecStart=/opt/masquerade/bin/hosted -i hosted  -h local.evan-brass.net.
