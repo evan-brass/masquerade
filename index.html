@@ -98,12 +98,11 @@ a.createDataChannel('');
 log_everything(a, 'a');
 log_everything(b, 'b');
 
-// TODO: Firefox would also need to mung the local password because no 487
 function dissolve({ type, sdp }) {
 	return {
 		type,
 		sdp: sdp
-			.replace(/a=ice-ufrag:.+/img, 'a=ice-ufrag:dissolve')
+			.replace(/a=ice-ufrag:.+/img, 'a=ice-lite\na=ice-ufrag:dissolve')
 			.replace(/a=ice-pwd:.+/img, 'a=ice-pwd:the/ice/password/constant')
 	};
 }
