@@ -25,6 +25,11 @@ impl Server {
 			return None;
 		}
 
+		// Cleared txid seems to be an amplification technique (possibly spoofed packets?)
+		if msg.txid() == &[0; 12] {
+			return None
+		}
+
 		let canonical = SocketAddr::new(sender.ip().to_canonical(), sender.port());
 
 		// Parse TURN attributes
