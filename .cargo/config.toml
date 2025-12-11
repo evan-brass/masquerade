@@ -1,9 +1,8 @@
 [profile.release]
-# debug = true
 overflow-checks = true
 
 [target.x86_64-unknown-linux-gnu]
-rustflags = ["-C", "linker=x86_64-linux-gnu-gcc"]
+linker = "x86_64-linux-gnu-gcc"
 
 [target.aarch64-unknown-linux-gnu]
-rustflags = ["-C", "linker=aarch64-linux-gnu-gcc"]
+linker = "aarch64-linux-gnu-gcc"
