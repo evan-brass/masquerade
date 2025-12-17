@@ -16,7 +16,9 @@ const config = {
 
 			// 'turn:debby.evan-brass.net',
 			'turn:192.168.10.203',
-			'turn:[2001:470:e9e0::2]',
+			// 'turn:[2001:470:e9e0::2]',
+			// 'turn:192.168.10.203?transport=tcp',
+			// 'turn:[2001:470:e9e0::2]?transport=tcp',
 		],
 		username: 'guest',
 		credential: 'password'
@@ -24,8 +26,9 @@ const config = {
 };
 function hosted({
 	// Random IP within the fd00::/64 subnet
-	ip = crypto.getRandomValues(new Uint16Array(4)).reduce((a, s) => a + ':' + s.toString(16), 'fd00:'),
-	// SCTP 
+	net = 'fd00:0:0:c4b0',
+	ip = crypto.getRandomValues(new Uint16Array(4)).reduce((a, s) => a + ':' + s.toString(16), net),
+	// UDP encapsulation 
 	port = 4666,
 } = {}) {
 	return {
@@ -62,7 +65,7 @@ function log_everything(conn, label = conn.pid, channel = conn.dc) {
 </script>
 
 <!-- Hosted -->
-<script type="_module">
+<script type="module">
 import { Ip6 } from './src/ip6.js';
 
 const h = new RTCPeerConnection(config);
@@ -73,7 +76,7 @@ o=- 42 2 IN IP4 0.0.0.0
 s=-
 t=0 0
 a=BUNDLE dc
-a=ice-ufrag:1ojd5dagg0kn2x8kdqxw6oh636avpoi900shxmp21azh4imks0+currently/ignored
+a=ice-ufrag:dissolve
 a=ice-pwd:the/ice/password/constant
 a=ice-lite
 a=fingerprint:sha-256 43:78:3C:C8:1E:A5:62:5E:A8:AA:7D:CF:04:9A:0C:A8:7D:8E:28:12:FA:EA:A0:47:42:98:36:3A:8C:68:C4:B0
@@ -94,7 +97,7 @@ await state({ 'open': dc });
 </script>
 
 <!-- Dissolved a<->b -->
-<script type="module">
+<script type="_module">
 const a = new RTCPeerConnection(config);
 const b = new RTCPeerConnection(config);
 a.createDataChannel('');

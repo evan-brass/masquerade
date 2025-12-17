@@ -156,6 +156,7 @@ fn main() -> Result<Never> {
 			let udp_length = (size_of::<UdpHeader>() as u16 + 20 /* size_of::<StunHeader>() */).checked_add(inner.length()).unwrap();
 			udp.length.set(udp_length);
 			udp.checksum.set(0);
+			// udp.checksum.set(0xffff);
 			
 			ip.payload_length = udp.length;
 
