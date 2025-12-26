@@ -7,15 +7,16 @@ sysctl net.ipv6.conf.all.forwarding=1
 modprobe sctp
 sysctl net.sctp.udp_port=4666
 
-# Startup our programs
-opt/arm64/bin/turnserver-udp -i turn-udp -m "::ffff:0:0/96<->2001:470:e9e0:100::/96,2000::/3<->A000::/3" &
-opt/arm64/bin/turnserver-tcp -i turn-tcp -s "2001:470:e9e0:100:2::/79" &
-opt/arm64/bin/ice-dissolve -i ice-dissolve &
-opt/arm64/bin/dtls-proxy -i dtls-proxy -c cfg/cert.pem &
-opt/arm64/bin/sctp-echo &
-
-# Wait a few for our interfaces to be created and turned on/up
-sleep 10
+# create our interfaces
+ip tuntap add mode tun dev turn-udp
+ip tuntap add mode tun dev turn-tcp
+ip tuntap add mode tun dev ice-dissolve
+ip tuntap add mode tun dev dtls-proxy
+# Set the links up so that we can use them in routing rules
+ip link set turn-udp up
+ip link set turn-tcp up
+ip link set ice-dissolve up
+ip link set dtls-proxy up
 
 # Configure routes for our TURN interfaces
 ip -6 route add A000::/3 dev turn-udp
@@ -38,3 +39,10 @@ ip -6 rule add oif lo from fd00:0:0:c4b0::/64 table 3
 ip -6 route add ::/0 dev dtls-proxy table 3
 # 4. Route handshake/ciphertext to dtls-proxy
 ip -6 route add fd00:0:0:c4b0::/64 dev dtls-proxy
+
+# Startup our programs
+opt/arm64/bin/turnserver-udp -i turn-udp -m "::ffff:0:0/96<->2001:470:e9e0:100::/96,2000::/3<->A000::/3" &
+opt/arm64/bin/turnserver-tcp -i turn-tcp -s "2001:470:e9e0:100:2::/79" &
+opt/arm64/bin/ice-dissolve -i ice-dissolve &
+opt/arm64/bin/dtls-proxy -i dtls-proxy -c cfg/cert.pem &
+opt/arm64/bin/sctp-echo &
