@@ -2,7 +2,7 @@ use eyre::Result;
 use clap::Parser;
 use tappers::{Interface, Tun};
 use tracing_subscriber::EnvFilter;
-use masquerade::wire::{ip_proto, FromBytes, Ip6Header, UdpHeader};
+use masquerade::wire::{FromBytes, IntoBytes, Ip6Header, UdpHeader, ip_checksum, ip_proto};
 use masquerade::stun::{
 	Class, Method, Stun,
 	attr::{integrity::Integrity, parse::AttrIter as _, *},
@@ -156,7 +156,15 @@ fn main() -> Result<Never> {
 			let udp_length = (size_of::<UdpHeader>() as u16 + 20 /* size_of::<StunHeader>() */).checked_add(inner.length()).unwrap();
 			udp.length.set(udp_length);
 			udp.checksum.set(0);
-			// udp.checksum.set(0xffff);
+			let checksum = ip_checksum(&[
+				&ip.src,
+				&ip.dst,
+				&[0, ip.next_header],
+				&ip.payload_length.as_bytes(),
+				&udp.as_bytes(),
+				&inner.buffer[..inner.len()]
+			]);
+			udp.checksum.set(if checksum == 0 { 0xffff } else { checksum });
 			
 			ip.payload_length = udp.length;
 

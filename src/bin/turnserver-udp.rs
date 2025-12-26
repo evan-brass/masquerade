@@ -19,7 +19,7 @@ use masquerade::stun::{
 	Class, Method, Stun, MAGIC_COOKIE,
 	attr::{integrity::Integrity, parse::AttrIter as _, *},
 };
-use masquerade::wire::{ip_proto, FromBytes, Ip6Header, StunAttrHeader, UdpHeader};
+use masquerade::wire::{FromBytes, IntoBytes, Ip6Header, StunAttrHeader, UdpHeader, ip_checksum, ip_proto};
 use tappers::{Interface, Tun};
 use tracing_subscriber::EnvFilter;
 use rand::{RngCore, rng};
@@ -307,7 +307,8 @@ fn main() -> Result<Never> {
 
 							// IP6 + UDP = 40 + 8 = 48 = STUN Data Indication! Perfect.  No copy/shift needed.
 							let (ip, rest) = Ip6Header::mut_from_prefix(&mut msg.buffer).unwrap();
-							let (udp, _) = UdpHeader::mut_from_prefix(rest).unwrap();
+							let (udp, rest) = UdpHeader::mut_from_prefix(rest).unwrap();
+							let data = &rest[..len];
 							ip.flags.set_version(6);
 							ip.flags.set_traffic_class(0);
 							ip.flags.set_flow_label(0);
@@ -320,7 +321,15 @@ fn main() -> Result<Never> {
 							udp.dst_port.set(peer.port());
 							udp.length.set(length);
 							udp.checksum.set(0);
-							// udp.checksum.set(0xffff);
+							let checksum = ip_checksum(&[
+								&ip.src,
+								&ip.dst,
+								&[0, ip.next_header],
+								&ip.payload_length.as_bytes(),
+								&udp.as_bytes(),
+								data
+							]);
+							udp.checksum.set(if checksum == 0 { 0xffff } else { checksum });
 
 							// Emit the UDP packet to the network:
 							let length = ip.len();

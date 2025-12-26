@@ -8,7 +8,7 @@ use std::{
 
 use clap::Parser;
 use eyre::Result;
-use masquerade::wire::{ip_proto, Ip6Header, UdpHeader};
+use masquerade::wire::{Ip6Header, UdpHeader, ip_checksum, ip_proto};
 use openssl::ssl::{Ssl, SslAcceptor, SslFiletype, SslMethod, SslStream};
 use tappers::{Interface, Tun};
 use tracing_subscriber::EnvFilter;
@@ -27,7 +27,6 @@ struct Args {
 }
 
 struct Buffers {
-
 	buffer: Vec<u8>,
 	network: Rc<Tun>,
 	received: VecDeque<u8>,
@@ -49,7 +48,15 @@ impl Write for Buffers {
 		ip.payload_length.set(len);
 		udp.length = ip.payload_length;
 		udp.checksum.set(0);
-		// udp.checksum.set(0xffff);
+		let checksum = ip_checksum(&[
+			&ip.src,
+			&ip.dst,
+			&[0, ip.next_header],
+			&ip.payload_length.as_bytes(),
+			&udp.as_bytes(),
+			buf
+		]);
+		udp.checksum.set(if checksum == 0 { 0xffff } else { checksum });
 
 		let _ = self.network.send(&self.buffer);
 		Ok(buf.len())
@@ -155,6 +162,7 @@ fn main() -> Result<Never> {
 				let t = udp.dst_port;
 				udp.dst_port = udp.src_port;
 				udp.src_port = t;
+				udp.checksum.set(0);
 				buffer.clear();
 				buffer.extend(ip.as_bytes());
 				buffer.extend(udp.as_bytes());
@@ -163,7 +171,7 @@ fn main() -> Result<Never> {
 				received.extend(data);
 			}
 			
-			// Attempt to receive deecrypted application data:
+			// Attempt to receive decrypted application data:
 			loop {
 				let (ip, rest) = Ip6Header::mut_from_prefix(buffer.as_mut_slice()).unwrap();
 				let (udp, rest) = UdpHeader::mut_from_prefix(rest).unwrap();
@@ -178,6 +186,16 @@ fn main() -> Result<Never> {
 					Ok(len) => {
 						udp.length.set((size_of::<UdpHeader>() + len) as u16);
 						ip.payload_length = udp.length;
+						udp.checksum.set(0);
+						let checksum = ip_checksum(&[
+							&ip.src,
+							&ip.dst,
+							&[0, ip.next_header],
+							&ip.payload_length.as_bytes(),
+							&udp.as_bytes(),
+							&rest[..len]
+						]);
+						udp.checksum.set(if checksum == 0 { 0xffff } else { checksum });
 						let length = ip.len();
 						let _ = network.send(&buffer[..length]);
 					}

@@ -88,3 +88,32 @@ pub struct DcepOpenHeader {
 	pub label_len: U16,
 	pub protocol_len: U16,
 }
+
+pub fn ip_checksum(slices: &[&[u8]]) -> u16 {
+	let mut accum = 0u32;
+	for (offset, b) in slices.into_iter().cloned().flatten().enumerate() {
+		if (offset % 2) == 0 {
+			accum += (*b as u32) << 8;
+		} else {
+			accum += *b as u32;
+		}
+	}
+	while accum > 0xffff {
+		accum = (accum >> 16) + (accum & 0xffff);
+	}
+	!(accum as u16)
+}
+
+#[test]
+fn udp_checksum() {
+	assert_eq!(0xaff5, ip_checksum(&[
+		/* IPv4 src */ &[127, 0, 0, 1],
+		/* IPv4 dst */ &[127, 0, 0, 1],
+
+		/* UDP Pseudo */ &[0, 17, 0x00, 0x13],
+
+		/* UDP ports */ &[0, 1, 0, 1],
+		/* UDP Length */ &[0x00, 0x13],
+		/* UDP Payload */ b"Hello World"
+	]));
+}
