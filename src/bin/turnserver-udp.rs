@@ -99,6 +99,7 @@ fn main() -> Result<Never> {
 	// Parse subnet mappings
 	let mut mappings = Vec::new();
 	for s in args.mappings.split(',') {
+		if s.is_empty() { continue };
 		mappings.push(Mapping::from_str(s)?);
 	}
 
