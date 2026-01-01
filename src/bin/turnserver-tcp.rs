@@ -1,5 +1,6 @@
 use std::io::{ErrorKind, Read, Write};
 use std::net::Ipv6Addr;
+use std::os::fd::AsRawFd;
 use std::str::FromStr;
 use std::{
 	net::SocketAddr,
@@ -12,6 +13,7 @@ use eyre::{Result, eyre};
 use ipnet::Ipv6Net;
 use masquerade::stun::Error as StunError;
 use mio::net::{TcpListener, TcpStream};
+use mio::unix::SourceFd;
 use mio::{
 	Events, Interest, Poll, Token,
 };
@@ -123,6 +125,8 @@ fn main() -> Result<Never> {
 	let mut poll = Poll::new()?;
 	poll.registry()
 		.register(&mut listener, TCP, Interest::READABLE)?;
+	poll.registry()
+		.register(&mut SourceFd(&network.as_raw_fd()), TUN, Interest::READABLE)?;
 
 	let mut buffer = [0; 65536];
 	let mut events = Events::with_capacity(128);
