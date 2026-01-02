@@ -1,8 +1,9 @@
 use eyre::Result;
 use clap::Parser;
+use masquerade::common::udp_checksum_fill;
 use tappers::{Interface, Tun};
 use tracing_subscriber::EnvFilter;
-use masquerade::wire::{FromBytes, IntoBytes, Ip6Header, UdpHeader, ip_checksum, ip_proto};
+use masquerade::wire::{FromBytes, Ip6Header, UdpHeader, ip_proto};
 use masquerade::stun::{
 	Class, Method, Stun,
 	attr::{integrity::Integrity, parse::AttrIter as _, *},
@@ -155,18 +156,9 @@ fn main() -> Result<Never> {
 			// Unwrap: Our responses are all fixed size and small enough
 			let udp_length = (size_of::<UdpHeader>() as u16 + 20 /* size_of::<StunHeader>() */).checked_add(inner.length()).unwrap();
 			udp.length.set(udp_length);
-			udp.checksum.set(0);
-			let checksum = ip_checksum(&[
-				&ip.src,
-				&ip.dst,
-				&[0, ip.next_header],
-				&ip.payload_length.as_bytes(),
-				&udp.as_bytes(),
-				&inner.buffer[..inner.len()]
-			]);
-			udp.checksum.set(if checksum == 0 { 0xffff } else { checksum });
-			
 			ip.payload_length = udp.length;
+			let data = &inner.buffer[..inner.len()];
+			udp_checksum_fill(&ip, udp, &data);
 
 			// Emit the ICE response packet:
 			let new_length = ip.len();

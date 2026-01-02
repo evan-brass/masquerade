@@ -9,7 +9,8 @@ use std::{
 
 use clap::Parser;
 use eyre::Result;
-use masquerade::wire::{Ip6Header, UdpHeader, ip_checksum, ip_proto};
+use masquerade::common::udp_checksum_fill;
+use masquerade::wire::{Ip6Header, UdpHeader, ip_proto};
 use openssl::hash::MessageDigest;
 use openssl::pkey::PKey;
 use openssl::rand::rand_bytes;
@@ -52,16 +53,7 @@ impl Write for Buffers {
 		let len = (size_of::<UdpHeader>() + buf.len()) as u16;
 		ip.payload_length.set(len);
 		udp.length = ip.payload_length;
-		udp.checksum.set(0);
-		let checksum = ip_checksum(&[
-			&ip.src,
-			&ip.dst,
-			&[0, ip.next_header],
-			&ip.payload_length.as_bytes(),
-			&udp.as_bytes(),
-			buf
-		]);
-		udp.checksum.set(if checksum == 0 { 0xffff } else { checksum });
+		udp_checksum_fill(&ip, udp, buf);
 
 		let _ = self.network.send(&self.buffer);
 		Ok(buf.len())
@@ -214,7 +206,6 @@ fn main() -> Result<Never> {
 				let t = udp.dst_port;
 				udp.dst_port = udp.src_port;
 				udp.src_port = t;
-				udp.checksum.set(0);
 				buffer.clear();
 				buffer.extend(ip.as_bytes());
 				buffer.extend(udp.as_bytes());
@@ -238,16 +229,8 @@ fn main() -> Result<Never> {
 					Ok(len) => {
 						udp.length.set((size_of::<UdpHeader>() + len) as u16);
 						ip.payload_length = udp.length;
-						udp.checksum.set(0);
-						let checksum = ip_checksum(&[
-							&ip.src,
-							&ip.dst,
-							&[0, ip.next_header],
-							&ip.payload_length.as_bytes(),
-							&udp.as_bytes(),
-							&rest[..len]
-						]);
-						udp.checksum.set(if checksum == 0 { 0xffff } else { checksum });
+						let data = &rest[..len];
+						udp_checksum_fill(&ip, udp, data);
 						let length = ip.len();
 						let _ = network.send(&buffer[..length]);
 					}
