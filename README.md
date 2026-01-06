@@ -1,5 +1,5 @@
 # Masquerade
-A single-hop relay using the TURN wire format.
+A relay using the TURN wire format.
 
 I run a free instance of this server.  Feel free to use it and see if it works for you.
 ```javascript
@@ -7,9 +7,9 @@ const config = {
 	iceTransportPolicy: 'relay', // Force relaying because I want to show the TURN server in action.
 	iceServers: [{
 		urls: [
-			'turn:stun.evan-brass.net',
-			'turn:stun.evan-brass.net?transport=tcp',
-			'turns:stun.evan-brass.net:443?transport=tcp',
+			'turn:turn.evan-brass.net',
+			'turn:turn.evan-brass.net?transport=tcp',
+			'turns:turn.evan-brass.net:443?transport=tcp',
 		],
 		username: 'guest',
 		credential: 'password'
@@ -31,9 +31,4 @@ await b.setRemoteDescription(a.localDescription);
 await b.setLocalDescription();
 while (b.iceGatheringState != 'complete') await new Promise(res => b.addEventListener('icegatheringstatechange', res, {once: true}));
 await a.setRemoteDescription(b.localDescription);
-```
-
-## How to run
-```
-podman build -t masquerade .; podman run --rm -p 3478:3478/udp -p 3478:3478/tcp --privileged masquerade
 ```

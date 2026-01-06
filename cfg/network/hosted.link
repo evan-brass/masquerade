@@ -1,6 +1,0 @@
-[Match]
-OriginalName=hosted
-
-[Link]
-ReceiveChecksumOffload=yes
-TransmitChecksumOffload=yes

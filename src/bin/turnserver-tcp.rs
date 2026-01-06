@@ -45,13 +45,13 @@ struct Mapping {
 }
 impl Mapping {
 	fn new(subnet: Ipv6Net) -> Result<Self> {
-		let needed_prefix = 128 - (usize::BITS - 15);
-		if subnet.prefix_len() as u32 != needed_prefix {
-			return Err(eyre!("Need a /{needed_prefix} subnet for a system with {} usize bits", usize::BITS));
+		let min_prefix_len = 128 - (usize::BITS - 15);
+		if min_prefix_len > subnet.prefix_len() as u32 {
+			return Err(eyre!("Need at most /{min_prefix_len} subnet for a system with {} usize bits, found /{}", usize::BITS, subnet.prefix_len()));
 		}
 		Ok(Self { subnet })
 	}
-	fn from_index(&self, index: usize) -> SocketAddrV6 {
+	fn from_index(&self, index: usize) -> Option<SocketAddrV6> {
 		// The least 15 bits become the port
 		let port = (index & 0x7fff | 0x8000) as u16;
 
@@ -59,7 +59,12 @@ impl Mapping {
 		let host = Ipv6Addr::from_bits(index as u128 >> 15);
 		let ip = self.subnet.network() | host;
 
-		SocketAddrV6::new(ip.into(), port, 0, 0)
+		// Check if we've exceeded our subnet
+		if !self.subnet.contains(&ip) {
+			return None
+		}
+
+		Some(SocketAddrV6::new(ip.into(), port, 0, 0))
 	}
 	fn to_index(&self, addr: SocketAddrV6) -> Option<usize> {
 		if !self.subnet.contains(addr.ip()) { return None };
@@ -135,7 +140,7 @@ fn main() -> Result<Never> {
 					stream.set_nodelay(true)?;
 					let entry = streams.vacant_entry();
 					let key = entry.key();
-					let relayed = mapping.from_index(key);
+					let Some(relayed) = mapping.from_index(key) else { continue };
 					poll.registry().register(
 						&mut stream,
 						Token(entry.key()),

@@ -1,0 +1,6 @@
+[NetDev]
+Name=turn-udp
+Kind=tun
+
+[Tun]
+User=masquerade

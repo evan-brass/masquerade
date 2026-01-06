@@ -1,0 +1,11 @@
+[NetDev]
+Name=wg0
+Kind=wireguard
+
+[WireGuard]
+PrivateKeyFile=/opt/masquerade/wg0.privkey
+ListenPort=51820
+
+[WireGuardPeer]
+PublicKey=E7I7T7O5Uo9bMzP+mFMM0j/vFf6K9zfGA4DHHpHEC2I=
+AllowedIPs=fd00:0:0::/48

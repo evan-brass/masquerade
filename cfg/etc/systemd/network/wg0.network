@@ -1,0 +1,5 @@
+[Match]
+Name=wg0
+
+[Route]
+Destination=fd00:0:0::/48

@@ -1,14 +1,14 @@
 [Unit]
-Description=DTLS proxy
+Description=Stateless ICE interception
 After=network-online.target
 
 [Install]
 WantedBy=multi-user.target
 
 [Service]
+User=masquerade
 Restart=always
-WorkingDirectory=/opt/masquerade
 Environment=RUST_BACKTRACE="full"
 Environment=RUST_LOG="trace"
-
-ExecStart=/opt/masquerade/bin/hosted -i hosted  -h local.evan-brass.net.
+WorkingDirectory=/opt/masquerade
+ExecStart=/opt/masquerade/bin/ice-dissolve -i ice-dissolve

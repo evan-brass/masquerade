@@ -1,0 +1,17 @@
+[Match]
+Name=turn-udp
+
+[Network]
+ConfigureWithoutCarrier=yes
+IgnoreCarrierLoss=yes
+
+[Link]
+RequiredForOnline=no
+
+# IPv4 Mapped /96
+[Route]
+Destination=2a01:4ff:1f0:7e46:0:1::/96
+
+# IPv6 Mapped /3
+[Route]
+Destination=A000::/3

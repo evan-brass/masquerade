@@ -1,0 +1,13 @@
+[Match]
+Name=turn-tcp
+
+[Network]
+ConfigureWithoutCarrier=yes
+IgnoreCarrierLoss=yes
+
+[Link]
+RequiredForOnline=no
+
+# TURN TCP Connections
+[Route]
+Destination=2a01:4ff:1f0:7e46:0:2::/96

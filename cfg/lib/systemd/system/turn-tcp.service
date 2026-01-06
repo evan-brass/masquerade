@@ -1,0 +1,14 @@
+[Unit]
+Description=Relay service using the TURN wire format over tcp
+After=network-online.target
+
+[Install]
+WantedBy=multi-user.target
+
+[Service]
+User=masquerade
+Restart=always
+Environment=RUST_BACKTRACE="full"
+Environment=RUST_LOG="trace"
+WorkingDirectory=/opt/masquerade
+ExecStart=/opt/masquerade/bin/turnserver-tcp -i turn-tcp -s "2a01:4ff:1f0:7e46:4::/79"

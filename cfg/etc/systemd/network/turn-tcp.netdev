@@ -1,0 +1,6 @@
+[NetDev]
+Name=turn-tcp
+Kind=tun
+
+[Tun]
+User=masquerade

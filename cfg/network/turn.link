@@ -1,6 +1,0 @@
-[Match]
-OriginalName=turn
-
-[Link]
-ReceiveChecksumOffload=yes
-TransmitChecksumOffload=yes

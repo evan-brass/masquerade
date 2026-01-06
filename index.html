@@ -5,20 +5,10 @@ const config = {
 	iceTransportPolicy: 'relay',
 	iceServers: [{
 		urls: [
-			// 'turn:stun.evan-brass.net',
-			// 'turn:stun.evan-brass.net?transport=tcp',
-			// 'turns:stun.evan-brass.net?transport=tcp',
-			// 'turns:stun.evan-brass.net:443?transport=tcp',
-
-			// 'turn:local.evan-brass.net',
-			// 'turn:local.evan-brass.net?transport=tcp',
-			// 'turns:local.evan-brass.net:443?transport=tcp',
-
-			// 'turn:debby.evan-brass.net',
-			'turn:192.168.10.203',
-			// 'turn:[2001:470:e9e0::2]',
-			// 'turn:192.168.10.203?transport=tcp',
-			// 'turn:[2001:470:e9e0::2]?transport=tcp',
+			'turn:turn.evan-brass.net',
+			'turn:turn.evan-brass.net?transport=tcp',
+			'turns:turn.evan-brass.net?transport=tcp',
+			'turns:turn.evan-brass.net:443?transport=tcp',
 		],
 		username: 'guest',
 		credential: 'password'
@@ -26,8 +16,7 @@ const config = {
 };
 function hosted({
 	// Random IP within the fd00::/64 subnet
-	net = 'fd00:0:0:c4b0',
-	ip = crypto.getRandomValues(new Uint16Array(4)).reduce((a, s) => a + ':' + s.toString(16), net),
+	ip = crypto.getRandomValues(new Uint16Array(3)).reduce((a, s) => a + ':' + s.toString(16), '2a01:4ff:1f0:7e46:c4b0'),
 	// UDP encapsulation 
 	port = 9899,
 	// port = 4666,
@@ -66,7 +55,7 @@ function log_everything(conn, label = conn.pid, channel = conn.dc) {
 </script>
 
 <!-- Hosted -->
-<script type="module">
+<script type="_module">
 import { Ip6 } from './src/ip6.js';
 
 const h = new RTCPeerConnection(config);
@@ -101,9 +90,8 @@ await state({ 'open': dc });
 <script type="_module">
 const a = new RTCPeerConnection(config);
 const b = new RTCPeerConnection(config);
-a.createDataChannel('');
 
-log_everything(a, 'a');
+log_everything(a, 'a', a.createDataChannel(''));
 log_everything(b, 'b');
 
 function dissolve({ type, sdp }) {
@@ -124,7 +112,7 @@ await a.setRemoteDescription(dissolve(b.localDescription));
 </script>
 
 <!-- Relay only a<->b -->
-<script type="_module">
+<script type="module">
 const a = new RTCPeerConnection(config);
 const b = new RTCPeerConnection(config);
 

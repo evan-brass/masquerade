@@ -1,0 +1,23 @@
+[Match]
+Name=ice-dissolve
+
+[Network]
+ConfigureWithoutCarrier=yes
+IgnoreCarrierLoss=yes
+
+[Link]
+RequiredForOnline=no
+
+# Capture TURN traffic
+[RoutingPolicyRule]
+Family=ipv6
+IncomingInterface=turn-udp
+Table=ice-dissolve
+[RoutingPolicyRule]
+Family=ipv6
+IncomingInterface=turn-tcp
+Table=ice-dissolve
+
+[Route]
+Destination=::/0
+Table=ice-dissolve

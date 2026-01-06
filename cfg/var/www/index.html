@@ -2,7 +2,7 @@
 <html>
 
 <head>
-	<title>stun.evan-brass.net</title>
+	<title>turn.evan-brass.net</title>
 	<style>
 body {
 	max-width: 80ch;
@@ -14,7 +14,7 @@ body {
 
 <body>
 	<header>
-		<h1>stun.evan-brass.net</h1>
+		<h1>turn.evan-brass.net</h1>
 		<p>This is a free STUN / TURN server</p>
 		<nav>
 			<a href="https://github.com/evan-brass/masquerade">opensource</a>
@@ -23,17 +23,17 @@ body {
 	<main>
 		<h2>How to use</h2>
 		<p>Adjust your WebRTC configuration to include this server:</p>
-		<pre><code id="config" lang="javascript">const config = {
-	iceServers: [{
-		urls: [
-			"turn:stun.evan-brass.net",
-			"turn:stun.evan-brass.net?transport=tcp",
-			"turns:stun.evan-brass.net:443?transport=tcp",
+		<pre><code lang="json">{
+	"iceServers": [{
+		"urls": [
+			"turn:turn.evan-brass.net",
+			"turn:turn.evan-brass.net?transport=tcp",
+			"turns:turn.evan-brass.net:443?transport=tcp"
 		],
-		username: "<span id="username">guest</span>",
-		credential: "password"
+		"username": "guest",
+		"credential": "password"
 	}]
-};</code></pre>
+}</code></pre>
 	</main>
 </body>
 
