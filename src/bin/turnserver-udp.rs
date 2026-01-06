@@ -108,9 +108,6 @@ fn main() -> Result<Never> {
 	let mut buffer = [0; 65536];
 	let mut events = Events::with_capacity(128);
 
-	// Ready to receive
-	network.set_up()?;
-
 	loop {
 		for e in events.into_iter() {
 			match e.token() {

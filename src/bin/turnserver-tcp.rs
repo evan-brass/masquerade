@@ -126,9 +126,6 @@ fn main() -> Result<Never> {
 	let mut events = Events::with_capacity(128);
 	let mut streams = Slab::new();
 
-	// Ready to receive
-	network.set_up()?;
-
 	loop {
 		for e in events.into_iter() {
 			match e.token() {

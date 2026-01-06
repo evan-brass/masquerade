@@ -78,13 +78,11 @@ fn main() -> Result<Never> {
 	let args = Args::try_parse()?;
 
 	// Setup the TUN interface
-	let mut network = if let Some(if_name) = args.if_name {
+	let network = Rc::new(if let Some(if_name) = args.if_name {
 		Tun::new_named(Interface::new(if_name)?)?
 	} else {
 		Tun::new()?
-	};
-	network.set_up()?;
-	let network = Rc::new(network);
+	});
 
 	// Configure the DTLS server
 	let mut acceptor = SslAcceptor::mozilla_modern(SslMethod::dtls())?;

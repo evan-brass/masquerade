@@ -196,7 +196,7 @@ pub fn handle_turn<'i>(canonical: SocketAddr, relayed: SocketAddrV6, mut msg: St
 			ip.flags.set_flow_label(0);
 			ip.payload_length.set(length);
 			ip.next_header = ip_proto::UDP;
-			ip.hop_limit = 5;
+			ip.hop_limit = 64;
 			ip.src = relayed.ip().octets();
 			ip.dst = peer.ip().octets();
 			udp.src_port.set(relayed.port());
