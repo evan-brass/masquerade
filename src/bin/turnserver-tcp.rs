@@ -223,6 +223,13 @@ fn main() -> Result<Never> {
 							match stream.peek(msg.buffer) {
 								Err(e) if e.kind() == ErrorKind::WouldBlock => break,
 								Ok(length) => match msg.decode(length) {
+									// Stream clogged... STUN/TURN message is bigger than our static sized read buffer...
+									Err(StunError::TooShort(expected)) if expected > msg.buffer.len() => {
+										// Cleanup
+										poll.registry().deregister(stream)?;
+										streams.remove(index);
+										break 'event;
+									}
 									Err(StunError::TooShort(_)) => break,
 									Err(StunError::NotStun) => {
 										// Cleanup
