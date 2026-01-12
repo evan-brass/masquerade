@@ -4,6 +4,7 @@ pub use zerocopy::{big_endian::{U16, U32}, little_endian::{U32 as U32_LE}, FromB
 pub mod ip_proto {
 	pub const UDP: u8 = 17;
 	pub const SCTP: u8 = 132;
+	pub const ICMP6: u8 = 58;
 }
 
 bitfield! {
@@ -116,4 +117,13 @@ fn udp_checksum() {
 		/* UDP Length */ &[0x00, 0x13],
 		/* UDP Payload */ b"Hello World"
 	]));
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, KnownLayout, Immutable, Unaligned, FromBytes, IntoBytes)]
+pub struct Icmp6Header {
+	pub typ: u8,
+	pub code: u8,
+	pub checksum: U16,
+	pub arg: [u8; 4], // For our purposes, every typ+code will have an arg.
 }

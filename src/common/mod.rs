@@ -9,7 +9,7 @@ use crate::stun::{
 	Class, Method, Stun, MAGIC_COOKIE,
 	attr::{integrity::Integrity, parse::AttrIter as _, *},
 };
-use crate::wire::{FromBytes, IntoBytes, Ip6Header, StunAttrHeader, UdpHeader, ip_checksum, ip_proto};
+use crate::wire::{FromBytes, Icmp6Header, IntoBytes, Ip6Header, StunAttrHeader, UdpHeader, ip_checksum, ip_proto};
 use rand::{RngCore, rng};
 
 pub fn udp_checksum_fill(ip: &Ip6Header, udp: &mut UdpHeader, data: &[u8]) {
@@ -217,42 +217,76 @@ pub fn handle_turn<'i>(canonical: SocketAddr, relayed: SocketAddrV6, mut msg: St
 }
 
 pub fn handle_net(len: usize, buffer: &mut [u8]) -> Option<(SocketAddrV6, Stun<&mut [u8]>)> {
-	let (ip, rest) = Ip6Header::mut_from_prefix(buffer).unwrap();
+	let (ip, rest) = Ip6Header::ref_from_prefix(buffer).unwrap();
 
 	if ip.flags.version() != 6 { return None }
 	if ip.len() != len { return None }
 
-	if ip.next_header != ip_proto::UDP { return None }
-	if ip.payload_length.get() < 8 { return None }
-	let (udp, _) = UdpHeader::mut_from_prefix(rest).unwrap();
-	if udp.length != ip.payload_length { return None }
-	let padding = (4 - udp.length.get() % 4) % 4;
+	// Relay UDP data
+	if ip.next_header == ip_proto::UDP {
+		if ip.payload_length.get() < size_of::<UdpHeader>() as u16 { return None }
+		let (udp, _) = UdpHeader::ref_from_prefix(rest).unwrap();
+		if udp.length != ip.payload_length { return None }
+		let padding = (4 - udp.length.get() % 4) % 4;
 
-	// STUN (xor_peer + data header - udp header length + padding + udp packet length)
-	let Some(stun_length) = (24 + 4 - 8 + padding).checked_add(udp.length.get()) else {
-		return None
-	};
-	let data_len = udp.length.get() - 8;
-	let sender = SocketAddrV6::new(ip.src.into(), udp.src_port.get(), 0, 0);
-	let receiver = SocketAddrV6::new(ip.dst.into(), udp.dst_port.get(), 0, 0);
+		// STUN (xor_peer + data header - udp header length + padding + udp packet length)
+		let Some(stun_length) = (24 + 4 - 8 + padding).checked_add(udp.length.get()) else {
+			return None
+		};
+		let data_len = udp.length.get() - 8;
+		let sender = SocketAddrV6::new(ip.src.into(), udp.src_port.get(), 0, 0);
+		let receiver = SocketAddrV6::new(ip.dst.into(), udp.dst_port.get(), 0, 0);
 
-	// Create a TURN message from this network message:
-	let mut msg = Stun { buffer };
-	msg.set_class(Class::Indication);
-	msg.set_method(Method::Data);
-	msg.set_length(0);
-	msg.set_cookie(MAGIC_COOKIE);
-	rng().fill_bytes(msg.set_txid());
-	msg.append::<XOR_PEER_ADDRESS, SocketAddr>(&sender.into()).unwrap();
+		// Create a TURN message from this network message:
+		let mut msg = Stun { buffer };
+		msg.set_class(Class::Indication);
+		msg.set_method(Method::Data);
+		msg.set_length(0);
+		msg.set_cookie(MAGIC_COOKIE);
+		rng().fill_bytes(msg.set_txid());
+		msg.append::<XOR_PEER_ADDRESS, SocketAddr>(&sender.into()).unwrap();
 
-	// Fill a STUN DATA attribute
-	let data = StunAttrHeader::mut_from_bytes(&mut msg.buffer[44..48]).unwrap();
-	data.typ.set(DATA);
-	data.length.set(data_len);
-	// Zero out the padding bytes:
-	msg.buffer[48 + data_len as usize..][..padding as usize].fill(0);
+		// Fill a STUN DATA attribute
+		let data = StunAttrHeader::mut_from_bytes(&mut msg.buffer[44..48]).unwrap();
+		data.typ.set(DATA);
+		data.length.set(data_len);
+		// Zero out the padding bytes:
+		msg.buffer[48 + data_len as usize..][..padding as usize].fill(0);
 
-	msg.set_length(stun_length);
+		msg.set_length(stun_length);
 
-	Some((receiver, msg))
+		Some((receiver, msg))
+	}
+
+	// Relay ICMP messages
+	// I shouldn't be writing this.  Nobody uses this information, but I can't focus on anything atm.
+	else if ip.next_header == ip_proto::ICMP6 {
+		if ip.payload_length.get() < (size_of::<Icmp6Header>() + size_of::<Ip6Header>() + size_of::<UdpHeader>()) as u16 { return None }
+		let (icmp, rest) = Icmp6Header::read_from_prefix(rest).unwrap();
+		if !matches!(icmp.typ, 1 | 2 | 3) { return None }
+		let (inner, rest) = Ip6Header::ref_from_prefix(rest).unwrap();
+		if inner.next_header != ip_proto::UDP { return None }
+		if inner.payload_length < size_of::<UdpHeader>() as u16 { return None }
+		let (udp, _) = UdpHeader::ref_from_prefix(rest).unwrap();
+		if udp.length != inner.payload_length { return None }
+
+		if ip.dst != inner.src { return None }
+		let inner_sender = SocketAddrV6::new(inner.src.into(), udp.src_port.get(), 0, 0);
+		let inner_receiver = SocketAddrV6::new(inner.dst.into(), udp.dst_port.get(), 0, 0);
+
+		let mut msg = Stun { buffer };
+		msg.set_class(Class::Indication);
+		msg.set_method(Method::Data);
+		msg.set_length(0);
+		msg.set_cookie(MAGIC_COOKIE);
+		rng().fill_bytes(msg.set_txid());
+		msg.append::<XOR_PEER_ADDRESS, SocketAddr>(&inner_receiver.into()).unwrap();
+		msg.append::<ICMP, _>(&(icmp.typ, icmp.code, icmp.arg)).unwrap();
+
+		Some((inner_sender, msg))
+	}
+
+	else {
+		None
+	}
 }

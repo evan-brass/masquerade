@@ -108,11 +108,35 @@ impl AttrEnc<RESERVATION_TOKEN> for [u8; 8] {
 }
 
 // TODO: https://www.rfc-editor.org/rfc/rfc8656.html#section-18.13 shows the ICMP Type as being 7 bits and the ICMP Code as being 9 bits.  I'm assuming this was a mistake since wikipedia show icmp4 and icmp6 as both having 8 bit types and codes.  I briefly checked coturn, and Chrome's WebRTC code, if they even parse ICMP attributes I didn't see it.  TURN, STUN, and WebRTC are all ass.
+// UPDATE: WireShark seems to misparse the leading two bytes as type and code instead of being reserved.  So.. I'm just gonna use those reserved bytes to duplicate the type and code.
+// .................;.........a;d;sfjaidospf ua[odfjua;oksjdf ;alksdj;lfkj]
+// I fucking hate WebRTC.
+// I fucking hate WebRTC.
+// I fucking hate WebRTC.
+// I fucking hate WebRTC.
+// I fucking hate WebRTC.
+// I fucking hate WebRTC.
+// I fucking hate WebRTC.
+// I fucking hate WebRTC.
+// I fucking hate WebRTC.
+// I fucking hate WebRTC.
+// I fucking hate WebRTC.
+// I fucking hate WebRTC.
+// I fucking hate WebRTC.
+// I fucking hate WebRTC.
+// I fucking hate WebRTC.
+// I fucking hate WebRTC.
+// I fucking hate WebRTC.
+// I fucking hate WebRTC.
+// I fucking hate WebRTC.
+// I fucking hate WebRTC.
+// I fucking hate WebRTC.
+pub struct WebRtcSucksAssAndShouldHaveNeverExistedError404SanityNotFound;
 impl Attr<'_, ICMP> for (u8, u8, [u8; 4]) {
-	type Error = core::array::TryFromSliceError;
-	fn decode(_: super::attr::Prefix<'_>, value: &'_ [u8]) -> Result<Self, Self::Error> {
-		let [_, _, typ, cod, a, b, c, d] = value.try_into()?;
-		Ok((typ, cod, [a, b, c, d]))
+	type Error = WebRtcSucksAssAndShouldHaveNeverExistedError404SanityNotFound;
+	fn decode(_: super::attr::Prefix<'_>, _: &'_ [u8]) -> Result<Self, Self::Error> {
+		// There's no klway to decode this atttribute
+		Err(WebRtcSucksAssAndShouldHaveNeverExistedError404SanityNotFound)
 	}
 }
 impl AttrEnc<ICMP> for (u8, u8, [u8; 4]) {
@@ -120,8 +144,8 @@ impl AttrEnc<ICMP> for (u8, u8, [u8; 4]) {
 		8
 	}
 	fn encode(&self, _: super::attr::Prefix, value: &mut [u8]) {
-		value[0] = 0;
-		value[1] = 0;
+		value[0] = self.0;
+		value[1] = self.1;
 		value[2] = self.0;
 		value[3] = self.1;
 		value[4..8].copy_from_slice(&self.2);
