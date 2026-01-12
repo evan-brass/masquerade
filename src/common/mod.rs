@@ -26,6 +26,9 @@ pub fn udp_checksum_fill(ip: &Ip6Header, udp: &mut UdpHeader, data: &[u8]) {
 }
 
 pub fn handle_turn<'i>(canonical: SocketAddr, relayed: SocketAddrV6, mut msg: Stun<&'i mut [u8]>, network: &Tun) -> Option<Stun<&'i mut [u8]>> {
+	// Forbid all zeroes txid.  Current suspicion is amplification DDOS.
+	if msg.txid() == &[0; 12] { return None }
+
 	// Parse TURN attributes
 	let mut username = None;
 	let mut realm = None;
@@ -36,7 +39,6 @@ pub fn handle_turn<'i>(canonical: SocketAddr, relayed: SocketAddrV6, mut msg: St
 	let mut channel = None;
 	let mut xor_peer = None;
 	let mut data = None;
-	let mut turn_fingerprint = None;
 	let unknown_attrs = msg
 		.into_iter()
 		.parse::<USERNAME, &str>(&mut username)
@@ -48,7 +50,6 @@ pub fn handle_turn<'i>(canonical: SocketAddr, relayed: SocketAddrV6, mut msg: St
 		.parse::<CHANNEL_NUMBER, u16>(&mut channel)
 		.parse::<XOR_PEER_ADDRESS, SocketAddr>(&mut xor_peer)
 		.parse::<DATA, &[u8]>(&mut data)
-		.parse::<FINGERPRINT, ()>(&mut turn_fingerprint)
 		.collect_unknown::<8>();
 
 	let method_unknown = !matches!(

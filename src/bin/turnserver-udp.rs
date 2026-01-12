@@ -119,9 +119,6 @@ fn main() -> Result<Never> {
 					};
 					if msg.decode(len).is_err() { continue }
 
-					// Cleared txid seems to be an amplification technique (possibly spoofed packets?)
-					if msg.txid() == &[0; 12] { continue }
-
 					let canonical = SocketAddr::new(sender.ip().to_canonical(), sender.port());
 					let mut mapped = match sender.ip() {
 						// TODO: If we encounter a v4 then we should emit v4 / canonical ip addresses to the UDP socket.
