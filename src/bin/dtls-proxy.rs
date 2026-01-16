@@ -1,6 +1,7 @@
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, VecDeque};
 use std::io::{Error, ErrorKind, Read, Write};
+use std::mem::swap;
 use std::net::SocketAddrV6;
 use std::time::{Duration, Instant};
 use std::{
@@ -32,12 +33,12 @@ struct Args {
 	if_name: Option<String>,
 }
 
-struct Buffers {
+struct Bio {
 	buffer: Vec<u8>,
 	network: Rc<Tun>,
 	received: VecDeque<u8>,
 }
-impl Write for Buffers {
+impl Write for Bio {
 	fn flush(&mut self) -> std::io::Result<()> {
 		// TODO: Anything here?
 		Ok(())
@@ -59,7 +60,7 @@ impl Write for Buffers {
 		Ok(buf.len())
 	}
 }
-impl Read for Buffers {
+impl Read for Bio {
 	fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
 		match self.received.read(buf) {
 			Ok(0) => Err(Error::new(ErrorKind::WouldBlock, "")),
@@ -166,7 +167,7 @@ fn main() -> Result<Never> {
 		// Encrypt the UDP payload and re-emit
 		if let Some(stream) = streams.get_mut(&src) {
 			// TODO: Set the prefix to unmodified ip+udp, then call ssl_write if our handshake state is complete.
-			let Buffers { buffer, .. } = stream.get_mut();
+			let Bio { buffer, .. } = stream.get_mut();
 			buffer.clear();
 			buffer.extend(ip.as_bytes());
 			buffer.extend(udp.as_bytes());
@@ -183,7 +184,7 @@ fn main() -> Result<Never> {
 					let mut ssl = Ssl::new(&context)?;
 					ssl.set_ex_data(cookie_info, dst);
 					ssl.set_accept_state();
-					let buffers = Buffers {
+					let buffers = Bio {
 						buffer: Vec::new(),
 						received: VecDeque::new(),
 						network: network.clone(),
@@ -195,15 +196,11 @@ fn main() -> Result<Never> {
 			let stream = occupied.get_mut();
 
 			// Set the prefix to reversed src/dst ip+udp, copy the data into the recv queue
-			{	let Buffers { buffer, received, .. } = stream.get_mut();
+			{	let Bio { buffer, received, .. } = stream.get_mut();
 				let mut ip = ip.clone();
-				let t = ip.dst;
-				ip.dst = ip.src;
-				ip.src = t;
 				let mut udp = udp.clone();
-				let t = udp.dst_port;
-				udp.dst_port = udp.src_port;
-				udp.src_port = t;
+				swap(&mut ip.src, &mut ip.dst);
+				swap(&mut udp.src_port, &mut udp.dst_port);
 				buffer.clear();
 				buffer.extend(ip.as_bytes());
 				buffer.extend(udp.as_bytes());

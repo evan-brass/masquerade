@@ -8,6 +8,7 @@ use masquerade::stun::{
 	Class, Method, Stun,
 	attr::{integrity::Integrity, parse::AttrIter as _, *},
 };
+use std::mem::swap;
 use std::net::SocketAddr;
 
 type Never = core::convert::Infallible;
@@ -144,12 +145,8 @@ fn main() -> Result<Never> {
 			}
 
 			// Swap dst and src in udp / ip
-			let t = udp.dst_port;
-			udp.dst_port = udp.src_port;
-			udp.src_port = t;
-			let t = ip.dst;
-			ip.dst = ip.src;
-			ip.src = t;
+			swap(&mut ip.src, &mut ip.dst);
+			swap(&mut udp.src_port, &mut udp.dst_port);
 
 			// Unwrap: Our responses are all fixed size and small enough
 			let udp_length = (size_of::<UdpHeader>() as u16 + 20 /* size_of::<StunHeader>() */).checked_add(inner.length()).unwrap();
