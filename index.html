@@ -3,6 +3,8 @@
 const is_firefox = typeof RTCPeerConnection.prototype.getIdentityAssertion == 'function';
 const config = {
 	iceTransportPolicy: 'relay',
+	bundlePolicy: 'max-bundle',
+	rtcpMuxPolicy: 'require',
 	iceServers: [{
 		urls: [
 			'turn:turn.evan-brass.net',
@@ -62,7 +64,7 @@ await h.setRemoteDescription({type:'offer',sdp:`v=0
 o=- 42 2 IN IP4 0.0.0.0
 s=-
 t=0 0
-a=BUNDLE dc
+a=group:BUNDLE dc
 a=ice-ufrag:dissolve
 a=ice-pwd:the/ice/password/constant
 a=ice-lite
