@@ -1,7 +1,6 @@
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, VecDeque};
 use std::io::{Error, ErrorKind, Read, Write};
-use std::mem::swap;
 use std::net::SocketAddrV6;
 use std::time::{Duration, Instant};
 use std::{
@@ -19,7 +18,7 @@ use openssl::sign::Signer;
 use openssl::ssl::{Ssl, SslAcceptor, SslFiletype, SslMethod, SslOptions, SslStream};
 use tappers::{Interface, Tun};
 use tracing_subscriber::EnvFilter;
-use zerocopy::{FromBytes, IntoBytes};
+use zerocopy::{FromBytes, FromZeros, IntoBytes};
 
 type Never = core::convert::Infallible;
 
@@ -34,7 +33,8 @@ struct Args {
 }
 
 struct Bio {
-	buffer: Vec<u8>,
+	send_from: SocketAddrV6,
+	send_to: SocketAddrV6,
 	network: Rc<Tun>,
 	received: VecDeque<u8>,
 }
@@ -45,18 +45,35 @@ impl Write for Bio {
 	}
 	fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
 		let packet_len = size_of::<Ip6Header>() + size_of::<UdpHeader>() + buf.len();
-		self.buffer.resize(packet_len, 0);
-		let (ip, rest) = Ip6Header::mut_from_prefix(self.buffer.as_mut()).unwrap();
-		let (udp, rest) = UdpHeader::mut_from_prefix(rest).unwrap();
-		rest.copy_from_slice(buf);
+		let mut buffer = Vec::with_capacity(packet_len);
+
+		let mut ip = Ip6Header::new_zeroed();
+		ip.flags.set_version(6);
+		ip.flags.set_traffic_class(0);
+		ip.flags.set_flow_label(0);
+		ip.next_header = ip_proto::UDP;
+		ip.hop_limit = 64;
+		ip.payload_length.set(size_of::<UdpHeader>() as u16 + buf.len() as u16);
+		ip.src = self.send_from.ip().octets();
+		ip.dst = self.send_to.ip().octets();
+		buffer.extend_from_slice(ip.as_bytes());
+
+		let mut udp = UdpHeader::new_zeroed();
+		udp.src_port.set(self.send_from.port());
+		udp.dst_port.set(self.send_to.port());
+		udp.length = ip.payload_length;
+		udp_checksum_fill(&ip, &mut udp, buf);
+		buffer.extend_from_slice(udp.as_bytes());
+
+		buffer.extend_from_slice(buf);
 
 		// Fixup the packet lengths:
 		let len = (size_of::<UdpHeader>() + buf.len()) as u16;
 		ip.payload_length.set(len);
 		udp.length = ip.payload_length;
-		udp_checksum_fill(&ip, udp, buf);
+		udp_checksum_fill(&ip, &mut udp, buf);
 
-		let _ = self.network.send(&self.buffer);
+		let _ = self.network.send(&buffer);
 		Ok(buf.len())
 	}
 }
@@ -167,10 +184,9 @@ fn main() -> Result<Never> {
 		// Encrypt the UDP payload and re-emit
 		if let Some(stream) = streams.get_mut(&src) {
 			// TODO: Set the prefix to unmodified ip+udp, then call ssl_write if our handshake state is complete.
-			let Bio { buffer, .. } = stream.get_mut();
-			buffer.clear();
-			buffer.extend(ip.as_bytes());
-			buffer.extend(udp.as_bytes());
+			let Bio { send_from, send_to, .. } = stream.get_mut();
+			*send_from = src;
+			*send_to = dst;
 
 			let _res = stream.ssl_write(data);
 			// TODO: Handle write errors
@@ -185,7 +201,8 @@ fn main() -> Result<Never> {
 					ssl.set_ex_data(cookie_info, dst);
 					ssl.set_accept_state();
 					let buffers = Bio {
-						buffer: Vec::new(),
+						send_from: dst,
+						send_to: src,
 						received: VecDeque::new(),
 						network: network.clone(),
 					};
@@ -196,14 +213,9 @@ fn main() -> Result<Never> {
 			let stream = occupied.get_mut();
 
 			// Set the prefix to reversed src/dst ip+udp, copy the data into the recv queue
-			{	let Bio { buffer, received, .. } = stream.get_mut();
-				let mut ip = ip.clone();
-				let mut udp = udp.clone();
-				swap(&mut ip.src, &mut ip.dst);
-				swap(&mut udp.src_port, &mut udp.dst_port);
-				buffer.clear();
-				buffer.extend(ip.as_bytes());
-				buffer.extend(udp.as_bytes());
+			{	let Bio { send_from, send_to, received, .. } = stream.get_mut();
+				*send_from = dst;
+				*send_to = src;
 
 				// Extend the receive buffer with received DTLS frames
 				received.extend(data);
