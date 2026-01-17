@@ -54,7 +54,7 @@ function log_everything(conn, label = conn.pid, channel = conn.dc) {
 </script>
 
 <!-- Hosted -->
-<script type="_module">
+<script type="module">
 import { Ip6 } from './src/ip6.js';
 
 const h = new RTCPeerConnection(config);
@@ -112,7 +112,7 @@ await a.setRemoteDescription(dissolve(b.localDescription));
 </script>
 
 <!-- Relay only a<->b -->
-<script type="module">
+<script type="_module">
 const a = new RTCPeerConnection(config);
 const b = new RTCPeerConnection(config);
 

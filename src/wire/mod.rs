@@ -55,6 +55,15 @@ pub struct UdpHeader {
 	pub checksum: U16,
 }
 
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, KnownLayout, Immutable, Unaligned, FromBytes, IntoBytes)]
+pub struct Udp6Packet<const N: usize> {
+	pub ip: Ip6Header,
+	pub udp: UdpHeader,
+	pub buffer: [u8; N],
+}
+
 #[repr(C)]
 #[derive(Debug, Clone, Copy, KnownLayout, Immutable, Unaligned, FromBytes, IntoBytes)]
 pub struct StunHeader {
