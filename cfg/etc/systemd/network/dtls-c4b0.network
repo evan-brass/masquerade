@@ -1,0 +1,12 @@
+[Match]
+Name=dtls-c4b0
+
+[Network]
+ConfigureWithoutCarrier=yes
+IgnoreCarrierLoss=yes
+
+[Link]
+RequiredForOnline=no
+
+[Route]
+Destination=2a01:4ff:1f0:7e46:c4b0::/80

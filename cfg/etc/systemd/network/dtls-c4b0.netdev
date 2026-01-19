@@ -1,0 +1,6 @@
+[NetDev]
+Name=dtls-c4b0
+Kind=tun
+
+[Tun]
+User=masquerade

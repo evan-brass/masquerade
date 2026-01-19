@@ -16,7 +16,7 @@ const config = {
 		credential: 'password'
 	}]
 };
-function hosted(prefix = 'fd00::c4b0') {
+function hosted(prefix = '2a01:4ff:1f0:7e46:c4b0') {
 	let [port, ...segments] = crypto.getRandomValues(new Uint16Array(4));
 	port |= 0x8000;
 	const ip = segments.reduce((a, v) => a + ':' + v.toString(16), prefix);
