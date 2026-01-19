@@ -4,31 +4,18 @@ use std::collections::BTreeMap;
 use std::io::{Error, ErrorKind, Read, Write};
 use std::net::{Ipv6Addr, SocketAddrV6};
 use std::str::FromStr;
-use std::time::{Duration, Instant};
 use std::{
 	rc::Rc,
 };
 
 use clap::Parser;
 use eyre::Result;
-use foreign_types::ForeignTypeRef;
 use masquerade::common::udp_checksum_fill;
 use masquerade::wire::{Ip6Header, Udp6Packet, UdpHeader, ip_proto};
-use openssl::hash::MessageDigest;
-use openssl::pkey::PKey;
-use openssl::rand::rand_bytes;
-use openssl::sign::Signer;
-use openssl::ssl::{ErrorCode, Ssl, SslAcceptor, SslFiletype, SslMethod, SslOptions, SslStream};
+use openssl::ssl::{ErrorCode, Ssl, SslAcceptor, SslFiletype, SslMethod, SslStream};
 use tappers::{Interface, Tun};
-use tracing::trace;
 use tracing_subscriber::EnvFilter;
 use zerocopy::{FromZeros, IntoBytes};
-
-// Neither openssl nor openssl-sys expose DTLSv1_listen.  We can set the cookie callbacks, but without DTLSv1_listen, the connection will reassemble the client hello (stateful), before issuing the HelloVerifyRequest... making the cookies pointless... pain and misery spring forth unending.
-unsafe extern "C" {
-	fn BIO_ADDR_new() -> *mut core::ffi::c_void;
-	fn DTLSv1_listen(s: *mut openssl_sys::SSL, ba: *mut core::ffi::c_void) -> core::ffi::c_int;
-}
 
 type Never = core::convert::Infallible;
 
@@ -54,8 +41,6 @@ struct Bio {
 	send_to: SocketAddrV6,
 	network: Rc<Tun>,
 	buffer: SharedBuffer,
-
-	did_write: bool,
 }
 impl Write for Bio {
 	fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
@@ -86,8 +71,6 @@ impl Write for Bio {
 		let _ = self.network.send(&packet.as_bytes()[..packet_length]);
 		// Burn the written packet
 		packet.udp.length.set(0);
-
-		self.did_write = true;
 
 		Ok(buf.len())
 	}
@@ -148,58 +131,11 @@ fn main() -> Result<Never> {
 	acceptor.set_certificate_chain_file(&args.cert)?;
 	acceptor.check_private_key()?;
 
-	// Enable DTLS Cookies
-	acceptor.set_options(SslOptions::COOKIE_EXCHANGE);
-	let cookie_info = Ssl::new_ex_index::<SocketAddrV6>()?;
-	let mut cookey = [0; 16];
-	rand_bytes(&mut cookey)?;
-	let startup = Instant::now();
-
-	acceptor.set_cookie_generate_cb(move |ssl, output| {
-		let info = ssl.ex_data(cookie_info).unwrap();
-		let (timestamp, rest) = output.split_first_chunk_mut().unwrap();
-		let (mac, _) = rest.split_first_chunk_mut::<20>().unwrap();
-		*timestamp = startup.elapsed().as_secs().to_be_bytes();
-
-		let cookey = PKey::hmac(&cookey)?;
-		let mut s = Signer::new(MessageDigest::sha1(), &cookey)?;
-		s.update(timestamp)?;
-		s.update(&info.ip().octets())?;
-		s.update(&info.port().to_be_bytes())?;
-		let len = s.sign(mac)?;
-
-		Ok(timestamp.len() + len)
-	});
-	acceptor.set_cookie_verify_cb(move |ssl, input| {
-		let info = ssl.ex_data(cookie_info).unwrap();
-		let Some((timestamp, mac)) = input.split_first_chunk::<8>() else { return false };
-		let then = u64::from_be_bytes(*timestamp);
-		let now = startup.elapsed().as_secs();
-		let Some(how_old) = now.checked_sub(then).map(Duration::from_secs) else { return false };
-		let too_old = Duration::from_mins(5);
-		if how_old > too_old { 
-			eprint!("Too OLD");
-			return false
-		}
-
-		let cookey = PKey::hmac(&cookey).unwrap();
-		let mut v = Signer::new(MessageDigest::sha1(), &cookey).unwrap();
-		v.update(timestamp).unwrap();
-		v.update(&info.ip().octets()).unwrap();
-		v.update(&info.port().to_be_bytes()).unwrap();
-		let mut temp = [0; 20];
-		assert_eq!(v.sign(&mut temp).unwrap(), temp.len(), "HMAC sign wrong length");
-		temp == mac
-	});
-
 	let context = acceptor.build().into_context();
 	
 	//
 	let buffer: SharedBuffer = Rc::new(RefCell::new(Udp6Packet::new_zeroed()));
 	let mut streams = BTreeMap::<SocketAddrV6, SslStream<_>>::new();
-
-	trace!(version = openssl::version::version(), "OpenSSL");
-	let bio_addr = unsafe { BIO_ADDR_new() };
 
 	loop {
 		let dst;
@@ -242,21 +178,14 @@ fn main() -> Result<Never> {
 			// Create new DTLS streams
 			Entry::Vacant(e) => {
 				let mut ssl = Ssl::new(&context)?;
-				ssl.set_ex_data(cookie_info, dst);
 				ssl.set_accept_state();
 				let buffers = Bio {
 					send_from: dst,
 					send_to: src,
 					buffer: buffer.clone(),
 					network: network.clone(),
-					did_write: false,
 				};
 				let stream = SslStream::new(ssl, buffers)?;
-
-				// Verify Cookies and set the accept state
-				// FUCK/TODO: Following 2 lines of code break FireFox...
-				let res = unsafe { DTLSv1_listen(stream.ssl().as_ptr(), bio_addr) };
-				if res < 1 { continue }
 
 				e.insert_entry(stream)
 			}

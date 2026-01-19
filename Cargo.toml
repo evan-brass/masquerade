@@ -13,8 +13,6 @@ ipnet = "2.11.0"
 md5 = "0.7.0"
 mio = { version = "1.0.4", features = ["net", "os-ext", "os-poll"] }
 openssl = "0.10.75"
-openssl-sys = "0.9.111"
-foreign-types = "0.3.2"
 paste = "1.0.15"
 rand = "0.9.1"
 rust-sctp = "0.0.6"
