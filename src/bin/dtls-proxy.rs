@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 use std::io::{Error, ErrorKind, Read, Write};
 use std::net::{Ipv6Addr, SocketAddrV6};
 use std::str::FromStr;
+use std::time::{Duration, Instant};
 use std::{
 	rc::Rc,
 };
@@ -41,6 +42,7 @@ struct Bio {
 	send_to: SocketAddrV6,
 	network: Rc<Tun>,
 	buffer: SharedBuffer,
+	last_update: Instant,
 }
 impl Write for Bio {
 	fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
@@ -71,6 +73,9 @@ impl Write for Bio {
 		let _ = self.network.send(&packet.as_bytes()[..packet_length]);
 		// Burn the written packet
 		packet.udp.length.set(0);
+
+		// TODO: It would probably be better to update this somewhere else
+		self.last_update = Instant::now();
 
 		Ok(buf.len())
 	}
@@ -136,6 +141,7 @@ fn main() -> Result<Never> {
 	//
 	let buffer: SharedBuffer = Rc::new(RefCell::new(Udp6Packet::new_zeroed()));
 	let mut streams = BTreeMap::<SocketAddrV6, SslStream<_>>::new();
+	let mut next_cleanup = 10;
 
 	loop {
 		let dst;
@@ -184,6 +190,7 @@ fn main() -> Result<Never> {
 					send_to: src,
 					buffer: buffer.clone(),
 					network: network.clone(),
+					last_update: Instant::now(),
 				};
 				let stream = SslStream::new(ssl, buffers)?;
 
@@ -245,6 +252,15 @@ fn main() -> Result<Never> {
 			udp_checksum_fill(ip, udp, buf);
 
 			let _ = network.send(&packet.as_bytes()[..packet_length]);
+		}
+
+		// Handle cleaning up old connections
+		let max_age = Duration::from_mins(5);
+		if streams.len() > next_cleanup {
+			streams.retain(|_, stream| {
+				stream.get_ref().last_update.elapsed() < max_age
+			});
+			next_cleanup = streams.len() + 10;
 		}
 	}
 }
