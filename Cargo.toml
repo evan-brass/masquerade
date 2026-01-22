@@ -18,6 +18,7 @@ rand = "0.9.1"
 rust-sctp = "0.0.6"
 sha1 = "0.10.6"
 slab = "0.4.10"
+srtp = { version = "0.7.0", default-features = false, features = ["enable-openssl"] }
 tappers = "0.4.2"
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }

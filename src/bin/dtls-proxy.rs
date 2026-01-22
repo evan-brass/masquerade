@@ -1,7 +1,7 @@
 use std::cell::RefCell;
 use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
-use std::io::{Error, ErrorKind, Read, Write};
+use std::io::{Cursor, Error, ErrorKind, Read, Write};
 use std::net::{Ipv6Addr, SocketAddrV6};
 use std::str::FromStr;
 use std::time::{Duration, Instant};
@@ -14,7 +14,9 @@ use eyre::Result;
 use masquerade::common::udp_checksum_fill;
 use masquerade::wire::{Ip6Header, Udp6Packet, UdpHeader, ip_proto};
 use openssl::ssl::{ErrorCode, Ssl, SslAcceptor, SslFiletype, SslMethod, SslStream};
+use srtp::openssl::{Config, InboundSession, OutboundSession, session_pair};
 use tappers::{Interface, Tun};
+use tracing::trace;
 use tracing_subscriber::EnvFilter;
 use zerocopy::{FromZeros, IntoBytes};
 
@@ -32,7 +34,8 @@ struct Args {
 	#[arg(long, short, default_value = "[::1]:9899")]
 	endpoint: String,
 
-	// TODO: srtp_endpoint
+	#[arg(long, short, default_value = "[::1]:4666")]
+	rtp_endpoint: String,
 }
 
 type SharedBuffer = Rc<RefCell<Udp6Packet<4096>>>;
@@ -43,6 +46,8 @@ struct Bio {
 	network: Rc<Tun>,
 	buffer: SharedBuffer,
 	last_update: Instant,
+
+	sessions: Option<(InboundSession, OutboundSession)>,
 }
 impl Write for Bio {
 	fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
@@ -122,6 +127,7 @@ fn main() -> Result<Never> {
 	// Parse command line arguments
 	let args = Args::try_parse()?;
 	let endpoint = SocketAddrV6::from_str(&args.endpoint)?;
+	let rtp_endpoint = SocketAddrV6::from_str(&args.rtp_endpoint)?;
 
 	// Setup the TUN interface
 	let network = Rc::new(if let Some(if_name) = args.if_name {
@@ -132,6 +138,7 @@ fn main() -> Result<Never> {
 
 	// Configure the DTLS server
 	let mut acceptor = SslAcceptor::mozilla_modern(SslMethod::dtls())?;
+	acceptor.set_tlsext_use_srtp(srtp::openssl::SRTP_PROFILE_NAMES)?;
 	acceptor.set_private_key_file(&args.cert, SslFiletype::PEM)?;
 	acceptor.set_certificate_chain_file(&args.cert)?;
 	acceptor.check_private_key()?;
@@ -147,6 +154,7 @@ fn main() -> Result<Never> {
 		let dst;
 		let src;
 		let plain;
+		let first_bytes;
 
 		// Receive a packet off the TUN
 		{	let mut buffer = buffer.borrow_mut();
@@ -164,13 +172,15 @@ fn main() -> Result<Never> {
 			if (ip.payload_length.get() as usize) < size_of::<UdpHeader>() { continue }
 			if udp.length != ip.payload_length { continue }
 			let len = udp.length.get() as usize - size_of::<UdpHeader>();
+			let data = &buffer[..len];
 
 			dst = SocketAddrV6::new(ip.dst.into(), udp.dst_port.get(), 0, 0);
 			src = SocketAddrV6::new(ip.src.into(), udp.src_port.get(), 0, 0);
 
+			first_bytes = data.first_chunk::<2>().cloned();
 			// Copy out the plaintext (which only comes from endpoint)
 			if src == endpoint {
-				plain = Vec::from(&buffer[..len]);
+				plain = Vec::from(data);
 			} else {
 				plain = Vec::new();
 			}
@@ -191,6 +201,7 @@ fn main() -> Result<Never> {
 					buffer: buffer.clone(),
 					network: network.clone(),
 					last_update: Instant::now(),
+					sessions: None,
 				};
 				let stream = SslStream::new(ssl, buffers)?;
 
@@ -204,10 +215,63 @@ fn main() -> Result<Never> {
 
 		let res = if stream.ssl().is_init_finished() == false {
 			// Progress the handshake if that's what we're doing
-			stream.do_handshake()
+			let res = stream.do_handshake();
+			if stream.ssl().is_init_finished() {
+				let session = session_pair(stream.ssl(), Config {
+					window_size: 0,
+					allow_repeat_tx: false,
+					encrypt_extension_headers: &[]
+				});
+				trace!(?session, "srtp session_pair");
+				stream.get_mut().sessions = session.ok();
+			}
+			res
+		} else if let Some([128..191, second_byte]) = first_bytes {
+			let mut packet = buffer.borrow_mut();
+			let &mut Udp6Packet { ref mut ip, ref mut udp, ref mut buffer } = &mut *packet;
+			let &mut Bio {
+				send_from,
+				send_to,
+				last_update: _, // TODO: Update last_update?
+				sessions: Some((ref mut incoming, ref mut outgoing)),
+				..
+			} = stream.get_mut() else { continue };
+			let mut cursor = Cursor::new(buffer.as_mut_bytes());
+			cursor.set_position(udp.length.get() as u64 - size_of::<UdpHeader>() as u64);
+
+			// Decrypt/encrypt media packets
+			let res = match (src == rtp_endpoint, second_byte) {
+				// https://datatracker.ietf.org/doc/html/rfc5761#section-8
+				(false, 200..224) => incoming.unprotect_rtcp(&mut cursor),
+				(false, _) => incoming.unprotect(&mut cursor),
+				(true, 200..224) => outgoing.protect_rtcp(&mut cursor),
+				(true, _) => outgoing.protect(&mut cursor),
+			};
+			let Ok(()) = res else { continue };
+
+			// Pass cipher text back to send_to, and plaintext out to rtp_endpoint
+			let receiver = if src == rtp_endpoint {
+				send_to
+			} else {
+				rtp_endpoint
+			};
+
+			let new_len = cursor.position() as usize;
+			let data = &buffer[..new_len];
+			let payload_length = u16::try_from(size_of::<UdpHeader>() + new_len)?;
+			let packet_length = size_of::<Ip6Header>() + size_of::<UdpHeader>() + new_len;
+			ip.payload_length.set(payload_length);
+			ip.src = send_from.ip().octets();
+			ip.dst = receiver.ip().octets();
+			udp.length = ip.payload_length;
+			udp.src_port.set(send_from.port());
+			udp.dst_port.set(receiver.port());
+			udp_checksum_fill(ip, udp, data);
+			let _ = network.send(&packet.as_bytes()[..packet_length]);
+			// Packet has been handled: continue
+			continue;
 		} else if src == endpoint {
 			// Write plaintext from endpoint or fetch/peek data off the stream
-			// TODO: SRTP
 			stream.ssl_write(&plain).map(|_| {})
 		} else {
 			// Use peek to prime the thing in the thing
