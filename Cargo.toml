@@ -10,14 +10,15 @@ crc = "3.2.1"
 eyre = "0.6.12"
 hmac = "0.12.1"
 ipnet = "2.11.0"
+libc = "0.2.180"
 md5 = "0.7.0"
 mio = { version = "1.0.4", features = ["net", "os-ext", "os-poll"] }
 openssl = "0.10.75"
 paste = "1.0.15"
 rand = "0.9.1"
-rust-sctp = "0.0.6"
 sha1 = "0.10.6"
 slab = "0.4.10"
+socket2 = { version = "0.6.2", features = ["all"] }
 srtp = { version = "0.7.0", default-features = false, features = ["enable-openssl"] }
 tappers = "0.4.2"
 tracing = "0.1.41"
