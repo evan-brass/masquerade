@@ -19,7 +19,7 @@ rand = "0.9.1"
 sha1 = "0.10.6"
 slab = "0.4.10"
 socket2 = { version = "0.6.2", features = ["all"] }
-srtp = { version = "0.7.0", default-features = false, features = ["enable-openssl"] }
+srtp = { git = "https://github.com/evan-brass/srtp.git", branch = "patch-1", default-features = false, features = ["enable-openssl"] }
 tappers = "0.4.2"
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }

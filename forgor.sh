@@ -3,3 +3,6 @@ sudo conntrack -I conntrack -p udp -s fd00::c4b0:0:0:0 --sport 32768 -d fd00:: -
 
 # Run dtls proxy
 sudo RUST_LOG="trace" opt/arm64/bin/dtls-proxy -c opt/cert.pem -i dtls1 -e [fd00::]:9899 -r [fd00::]:4666
+
+# stream audio to dtls-proxy to be encrypted
+gst-launch-1.0 audiotestsrc ! opusenc ! rtpopuspay pt=100 ! udpsink bind-port=4666 host=2a01:4ff:1f0:7e46:c4b0:: port=32768

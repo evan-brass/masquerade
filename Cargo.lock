@@ -812,8 +812,7 @@ dependencies = [
 [[package]]
 name = "srtp"
 version = "0.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fb540d32caaf82c5913e5b8283691783643bc1168815ccd9a934d18b02b269ff"
+source = "git+https://github.com/evan-brass/srtp.git?branch=patch-1#32595f5422d0ce4f9c22f38e81bbe944217756f3"
 dependencies = [
  "foreign-types 0.5.0",
  "libc",
