@@ -1,0 +1,14 @@
+[Unit]
+Description=SCTP/DataChannel service providing a network level VPN
+After=network-online.target
+
+[Install]
+WantedBy=multi-user.target
+
+[Service]
+User=masquerade
+Restart=always
+Environment=RUST_BACKTRACE="full"
+Environment=RUST_LOG="trace"
+WorkingDirectory=/opt/masquerade
+ExecStart=/opt/masquerade/bin/snow-fell -i snow-fell -s "2a01:4ff:1f0:7e46:0:3::/96"

@@ -1,0 +1,6 @@
+[NetDev]
+Name=snow-fell
+Kind=tun
+
+[Tun]
+User=masquerade
