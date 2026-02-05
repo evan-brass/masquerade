@@ -70,7 +70,7 @@ pub fn handle_turn<'i>(canonical: SocketAddr, relayed: SocketAddrV6, mut msg: St
 		ctx.consume(":");
 		ctx.consume(realm);
 		ctx.consume(":password");
-		ctx.compute().0
+		ctx.finalize().0
 	} else {
 		[0; 16]
 	};
