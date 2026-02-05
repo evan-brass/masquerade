@@ -1,5 +1,5 @@
-use std::borrow::BorrowMut;
-use std::{
+use core::borrow::BorrowMut;
+use core::{
 	net::SocketAddr,
 	net::SocketAddrV6,
 };

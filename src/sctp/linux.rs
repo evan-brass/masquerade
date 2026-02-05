@@ -1,7 +1,7 @@
 #![allow(nonstandard_style)]
 /// Definitions arising out of linux/sctp.h, but pruned to fit our usages.
 
-use std::ffi::c_int;
+use core::ffi::c_int;
 use libc::sockaddr_storage;
 use libc::sctp_assoc_t;
 

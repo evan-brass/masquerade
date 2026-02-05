@@ -8,8 +8,9 @@ impl core::fmt::Display for Error {
 		}
 	}
 }
-impl std::error::Error for Error {}
+impl core::error::Error for Error {}
 
+#[cfg(feature = "std")]
 impl From<Error> for std::io::Error {
 	fn from(value: Error) -> Self {
 		std::io::Error::new(

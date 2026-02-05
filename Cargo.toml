@@ -23,4 +23,7 @@ srtp = { git = "https://github.com/evan-brass/srtp.git", branch = "patch-1", def
 tappers = "0.4.2"
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
-zerocopy = { version = "0.8.25", features = ["std", "derive"] }
+zerocopy = { version = "0.8.25", features = ["derive"] }
+
+[features]
+std = []
