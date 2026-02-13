@@ -1,5 +1,6 @@
 <!DOCTYPE html>
-<button>User Gesture</button>
+<button>User Gesture</button><br>
+<video controls></video>
 <script>
 const is_firefox = typeof RTCPeerConnection.prototype.getIdentityAssertion == 'function';
 const config = {
@@ -59,14 +60,7 @@ function log_everything(conn, label = conn.pid, channel = conn.dc) {
 import { Ip6 } from './src/ip6.js';
 
 const h = new RTCPeerConnection(config);
-const dc = h.createDataChannel('', {negotiated: true, id: 0});
-dc.addEventListener('message', ({ data }) => {
-	if (typeof data != 'string') return;
-	let [info, payload] = data.split('\n', 2);
-	try { info = JSON.parse(info); } catch {}
-	console.log('message', info, payload);
-});
-log_everything(h, 'h', dc);
+log_everything(h, 'h');
 await h.setRemoteDescription({type:'offer',sdp:`v=0
 o=- 42 2 IN IP4 0.0.0.0
 s=-
@@ -93,11 +87,17 @@ a=rtpmap:100 opus/48000/2
 
 const [trans] = h.getTransceivers();
 trans.direction = 'sendonly';
+const generated = new MediaStreamTrackGenerator('audio');
+trans.sender.replaceTrack(generated);
+
+debugger;
 
 await h.setLocalDescription();
 // await h.addIceCandidate(hosted('fd00::c4b0'));
 await h.addIceCandidate(hosted());
 console.log(h.localDescription.type, h.localDescription.sdp);
+
+const writer = generated.writable.getWriter()
 
 await state({ 'click': document.body });
 const stream = await navigator.mediaDevices.getUserMedia({
@@ -105,6 +105,7 @@ const stream = await navigator.mediaDevices.getUserMedia({
 	video: false,
 });
 const [track] = stream.getAudioTracks();
+debugger;
 await trans.sender.replaceTrack(track);
 </script>
 
@@ -138,8 +139,19 @@ await a.setRemoteDescription(dissolve(b.localDescription));
 const a = new RTCPeerConnection(config);
 const b = new RTCPeerConnection(config);
 
-log_everything(a, 'a', a.createDataChannel(''));
+log_everything(a, 'a');
 log_everything(b, 'b');
+
+const player = document.querySelector('video');
+player.srcObject = new MediaStream();
+b.addEventListener('track', ({track}) => player.srcObject.addTrack(track));
+
+await state({click: document.body});
+player.play();
+const stream = await navigator.mediaDevices.getUserMedia({audio: true, video: true});
+for (const track of stream.getTracks()) {
+	const _sender = a.addTrack(track, stream);
+}
 
 await a.setLocalDescription();
 while (a.iceGatheringState != 'complete') await state({'icegatheringstatechange': a});

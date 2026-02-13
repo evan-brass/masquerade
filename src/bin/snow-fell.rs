@@ -1,7 +1,9 @@
-use std::{io::{Error, ErrorKind, IoSlice, IoSliceMut}, mem::{transmute, zeroed}, net::{Ipv6Addr, SocketAddrV6}, os::{fd::AsRawFd, raw::c_int}, ptr::{NonNull, from_mut, from_ref, read_unaligned, write_unaligned}, str::{FromStr, from_utf8}};
+use std::{io::{Error, ErrorKind, IoSlice, IoSliceMut}, mem::{transmute, zeroed}, net::{Ipv6Addr, SocketAddrV6, UdpSocket}, os::{fd::{AsRawFd}, raw::c_int}, ptr::{NonNull, from_mut, from_ref, read_unaligned, write_unaligned}, str::{FromStr, from_utf8}, usize};
 
 use eyre::{Result, eyre};
 use clap::Parser;
+use gio::Socket as GSocket;
+use gstreamer::{ElementFactory, Pipeline, glib::object::ObjectExt, prelude::{ElementExt, ElementExtManual, GstBinExtManual, UnixBusExtManual}};
 use ipnet::Ipv6Net;
 use libc::{CMSG_DATA, CMSG_FIRSTHDR, CMSG_LEN, CMSG_NXTHDR, CMSG_SPACE, IPPROTO_SCTP, MSG_EOR, MSG_NOTIFICATION, MSG_TRUNC, SCTP_ALL_ASSOC, SCTP_ENABLE_CHANGE_ASSOC_REQ, SCTP_ENABLE_RESET_ASSOC_REQ, SCTP_ENABLE_RESET_STREAM_REQ, SCTP_INITMSG, SCTP_PR_SCTP_RTX, SCTP_PRINFO, SCTP_RECVRCVINFO, SCTP_SNDINFO, SCTP_UNORDERED, cmsghdr, getsockopt, msghdr, recvmsg, sctp_assoc_t, sctp_initmsg, sctp_prinfo, sctp_rcvinfo, sctp_sndinfo, sendmsg, setsockopt, sockaddr_storage, socklen_t};
 use masquerade::{sctp::linux::{SCTP_ENABLE_STREAM_RESET, SCTP_REMOTE_UDP_ENCAPS_PORT, sctp_assoc_change, sctp_assoc_value, sctp_event, sctp_sac_state, sctp_shutdown_event, sctp_sn_type, sctp_udpencaps, sn_header}, wire::{DcepOpenHeader, Ip6Header}};
@@ -19,6 +21,9 @@ type Never = core::convert::Infallible;
 struct Args {
 	#[arg(long, short, default_value_t = 5000)]
 	port: u16,
+
+	#[arg(long, short, default_value_t = 4666)]
+	rtp_port: u16,
 
 	#[arg(long, short, default_value = "fd00::1:0:0/96")]
 	subnet: String,
@@ -59,6 +64,7 @@ impl Mapping {
 
 const TUN: Token = Token(usize::MAX);
 const SCTP: Token = Token(usize::MAX - 1);
+const BUS: Token = Token(usize::MAX - 2);
 
 fn main() -> Result<Never> {
 	// Enable logging
@@ -137,8 +143,34 @@ fn main() -> Result<Never> {
 	};
 	assert_eq!(res, 0, "Failed to enable shutdown message");
 
+	// Bind a UDP socket to serve as the entry/exit point for our gstreamer stuff
+	let rtp_udp = UdpSocket::bind(SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, args.rtp_port, 0, 0))?;
+	let rtp_udp = GSocket::from_fd(rtp_udp.into())?;
+
+	// setup a gstreamer pipeline
+	gstreamer::init()?;
+	let pipeline = Pipeline::new();
+	let bus = pipeline.bus().ok_or(eyre!("No bus on pipeline?"))?;
+
+	let udpsrc = ElementFactory::make("udpsrc").build()?;
+	udpsrc.set_property("socket", rtp_udp);
+
+	let rtpbin = ElementFactory::make("rtpbin").build()?;
+	rtpbin.set_property("autoremove", true);
+	let _ = rtpbin.connect("on-new-sender-ssrc", false, |args| {
+		trace!(?args, "new sender SSRC");
+		None
+	});
+	
+	pipeline.add_many(&[&udpsrc, &rtpbin])?;
+
+	udpsrc.link(&rtpbin)?;
+
+	pipeline.set_state(gstreamer::State::Playing)?;
+
 	let mut events = Events::with_capacity(128);
 	let mut poll = Poll::new()?;
+	poll.registry().register(&mut SourceFd(&bus.pollfd()), BUS, Interest::READABLE)?;
 	poll.registry().register(&mut SourceFd(&network.as_raw_fd()), TUN, Interest::READABLE)?;
 	poll.registry().register(&mut SourceFd(&socket.as_raw_fd()), SCTP, Interest::READABLE)?;
 
@@ -148,6 +180,10 @@ fn main() -> Result<Never> {
 	loop {
 		for e in events.into_iter() {
 			match e.token() {
+				BUS => loop {
+					let Some(msg) = bus.pop() else { break };
+					trace!(?msg, "gst bus message");
+				}
 				TUN => loop {
 					let Ok(length) = network.recv(&mut buffer) else { break };
 					let (ip, _) = Ip6Header::ref_from_prefix(buffer.as_slice()).unwrap();
