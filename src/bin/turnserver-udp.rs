@@ -127,7 +127,7 @@ fn main() -> Result<Never> {
 							break;
 						}
 					}
-					let relayed = SocketAddrV6::new(mapped.into(), sender.port(), 0, 0);
+					let relayed = SocketAddrV6::new(mapped, sender.port(), 0, 0);
 
 					let Some(resp) = handle_turn(canonical, relayed, msg, &network) else {
 						continue;
@@ -160,7 +160,7 @@ fn main() -> Result<Never> {
 					// Send the new STUN Data indication to the receiver
 					let length = msg.len();
 					// TODO: For non-dual-stack sockets, we probably need the receiver in canonical form...
-					let _ = socket.send_to(&msg.buffer[..length], mapped_receiver.into());
+					let _ = socket.send_to(&msg.buffer[..length], mapped_receiver);
 				},
 				// We don't use any other tokens
 				_ => unreachable!(),

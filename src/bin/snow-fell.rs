@@ -5,7 +5,6 @@ use std::{
 	os::{fd::AsRawFd, raw::c_int},
 	ptr::{NonNull, from_mut, from_ref, read_unaligned, write_unaligned},
 	str::{FromStr, from_utf8},
-	usize,
 };
 
 use clap::Parser;
@@ -230,7 +229,7 @@ fn main() -> Result<Never> {
 		None
 	});
 
-	pipeline.add_many(&[&udpsrc, &rtpbin])?;
+	pipeline.add_many([&udpsrc, &rtpbin])?;
 
 	udpsrc.link(&rtpbin)?;
 
@@ -473,17 +472,16 @@ fn main() -> Result<Never> {
 								..
 							} = unsafe { ptr.read_unaligned() };
 							trace!(?cmsg_level, ?cmsg_type, "CMSG");
-							match (cmsg_level, cmsg_type) {
-								(libc::IPPROTO_SCTP, libc::SCTP_RCVINFO) => {
-									let inner = unsafe {
-										libc::CMSG_DATA(ptr.as_mut())
-											.cast::<libc::sctp_rcvinfo>()
-											.read_unaligned()
-									};
-									recvinfo = Some(inner);
-									break;
-								}
-								_ => {}
+							if let (libc::IPPROTO_SCTP, libc::SCTP_RCVINFO) =
+								(cmsg_level, cmsg_type)
+							{
+								let inner = unsafe {
+									libc::CMSG_DATA(ptr.as_mut())
+										.cast::<libc::sctp_rcvinfo>()
+										.read_unaligned()
+								};
+								recvinfo = Some(inner);
+								break;
 							}
 							cmsg = unsafe { libc::CMSG_NXTHDR(&msg, cmsg) };
 						}

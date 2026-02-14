@@ -148,7 +148,7 @@ fn main() -> Result<Never> {
 				inner.set_length(0);
 				inner.set_class(Class::Success);
 				inner
-					.append::<XOR_MAPPED_ADDRESS, SocketAddr>(&sender.into())
+					.append::<XOR_MAPPED_ADDRESS, SocketAddr>(&sender)
 					.unwrap();
 				inner
 					.append::<MESSAGE_INTEGRITY, _>(&ice_key.as_slice())
@@ -167,7 +167,7 @@ fn main() -> Result<Never> {
 			udp.length.set(udp_length);
 			ip.payload_length = udp.length;
 			let data = &inner.buffer[..inner.len()];
-			udp_checksum_fill(&ip, udp, &data);
+			udp_checksum_fill(ip, udp, data);
 
 			// Emit the ICE response packet:
 			let new_length = ip.len();

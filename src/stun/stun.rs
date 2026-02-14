@@ -21,7 +21,7 @@ impl<B: Borrow<[u8]>> Stun<B> {
 			return Err(Error::TooShort(4));
 		}
 		let length = self.length();
-		if length % 4 != 0 {
+		if !length.is_multiple_of(4) {
 			return Err(Error::NotStun);
 		}
 

@@ -17,8 +17,8 @@ pub fn udp_checksum_fill(ip: &Ip6Header, udp: &mut UdpHeader, data: &[u8]) {
 		&ip.src,
 		&ip.dst,
 		&[0, ip.next_header],
-		&ip.payload_length.as_bytes(),
-		&udp.as_bytes(),
+		ip.payload_length.as_bytes(),
+		udp.as_bytes(),
 		data,
 	]);
 	udp.checksum
@@ -244,9 +244,7 @@ pub fn handle_net(len: usize, buffer: &mut [u8]) -> Option<(SocketAddrV6, Stun<&
 		let padding = (4 - udp.length.get() % 4) % 4;
 
 		// STUN (xor_peer + data header - udp header length + padding + udp packet length)
-		let Some(stun_length) = (24 + 4 - 8 + padding).checked_add(udp.length.get()) else {
-			return None;
-		};
+		let stun_length = (24 + 4 - 8 + padding).checked_add(udp.length.get())?;
 		let data_len = udp.length.get() - 8;
 		let sender = SocketAddrV6::new(ip.src.into(), udp.src_port.get(), 0, 0);
 		let receiver = SocketAddrV6::new(ip.dst.into(), udp.dst_port.get(), 0, 0);
@@ -281,7 +279,7 @@ pub fn handle_net(len: usize, buffer: &mut [u8]) -> Option<(SocketAddrV6, Stun<&
 			return None;
 		}
 		let (icmp, rest) = Icmp6Header::read_from_prefix(rest).unwrap();
-		if !matches!(icmp.typ, 1 | 2 | 3) {
+		if !matches!(icmp.typ, 1..=3) {
 			return None;
 		}
 		let (inner, rest) = Ip6Header::ref_from_prefix(rest).unwrap();

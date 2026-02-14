@@ -238,7 +238,7 @@ fn main() -> Result<Never> {
 		};
 		let stream = entry.get_mut();
 
-		let res = if stream.ssl().is_init_finished() == false {
+		let res = if !stream.ssl().is_init_finished() {
 			// Progress the handshake if that's what we're doing
 			let res = stream.do_handshake();
 			if stream.ssl().is_init_finished() {
@@ -315,11 +315,11 @@ fn main() -> Result<Never> {
 		};
 
 		// Handle errors:
-		if let Err(e) = res {
-			if !matches!(e.code(), ErrorCode::WANT_READ | ErrorCode::WANT_WRITE) {
-				entry.remove();
-				continue;
-			}
+		if let Err(e) = res
+			&& !matches!(e.code(), ErrorCode::WANT_READ | ErrorCode::WANT_WRITE)
+		{
+			entry.remove();
+			continue;
 		}
 
 		// Pull data out, and emit plaintext UDP

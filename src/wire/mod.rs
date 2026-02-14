@@ -110,7 +110,7 @@ pub struct DcepOpenHeader {
 
 pub fn ip_checksum(slices: &[&[u8]]) -> u16 {
 	let mut accum = 0u32;
-	for (offset, b) in slices.into_iter().cloned().flatten().enumerate() {
+	for (offset, b) in slices.iter().cloned().flatten().enumerate() {
 		if (offset % 2) == 0 {
 			accum += (*b as u32) << 8;
 		} else {

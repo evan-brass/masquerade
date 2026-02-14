@@ -63,7 +63,7 @@ impl Mapping {
 			return None;
 		}
 
-		Some(SocketAddrV6::new(ip.into(), port, 0, 0))
+		Some(SocketAddrV6::new(ip, port, 0, 0))
 	}
 	fn to_index(&self, addr: SocketAddrV6) -> Option<usize> {
 		if !self.subnet.contains(addr.ip()) {
@@ -89,7 +89,7 @@ impl PartialEq for Conn {
 impl Eq for Conn {}
 impl PartialOrd for Conn {
 	fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-		self.relayed.partial_cmp(&other.relayed)
+		Some(self.relayed.cmp(&other.relayed))
 	}
 }
 impl Ord for Conn {
