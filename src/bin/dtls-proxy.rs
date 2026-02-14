@@ -1,13 +1,11 @@
 use std::cell::RefCell;
-use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
+use std::collections::btree_map::Entry;
 use std::io::{Cursor, Error, ErrorKind, Read, Write};
 use std::net::{Ipv6Addr, SocketAddrV6};
+use std::rc::Rc;
 use std::str::FromStr;
 use std::time::{Duration, Instant};
-use std::{
-	rc::Rc,
-};
 
 use clap::Parser;
 use eyre::Result;
@@ -50,14 +48,20 @@ struct Bio {
 	sessions: Option<(InboundSession, OutboundSession)>,
 }
 impl Write for Bio {
-	fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+	fn flush(&mut self) -> std::io::Result<()> {
+		Ok(())
+	}
 	fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
 		let mut packet = self.buffer.borrow_mut();
 		let payload_length = size_of::<UdpHeader>() + buf.len();
 		let packet_length = size_of::<Ip6Header>() + payload_length;
 
 		// Check if the buf fits into our packet
-		let &mut Udp6Packet { ref mut ip, ref mut udp, ref mut buffer } = &mut*packet;
+		let &mut Udp6Packet {
+			ref mut ip,
+			ref mut udp,
+			ref mut buffer,
+		} = &mut *packet;
 		let Some(dst) = buffer.get_mut(..buf.len()) else {
 			return Err(Error::new(ErrorKind::OutOfMemory, "Packet too large"));
 		};
@@ -88,13 +92,17 @@ impl Write for Bio {
 impl Read for Bio {
 	fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
 		let mut packet = self.buffer.borrow_mut();
-		let &mut Udp6Packet { ref ip, ref mut udp, ref mut buffer } = &mut *packet;
+		let &mut Udp6Packet {
+			ref ip,
+			ref mut udp,
+			ref mut buffer,
+		} = &mut *packet;
 
 		// Check UDP length
 		let Some(len) = udp.length.get().checked_sub(size_of::<UdpHeader>() as u16) else {
 			return Err(Error::new(ErrorKind::WouldBlock, "Packet burned"));
 		};
-		
+
 		// Check dst ip
 		if Ipv6Addr::from(ip.dst) != *self.send_from.ip() {
 			return Err(Error::new(ErrorKind::WouldBlock, "IP mismatch"));
@@ -110,7 +118,7 @@ impl Read for Bio {
 		let len = len as usize;
 		let src = buffer.get(..len).unwrap();
 		let Some(dst) = buf.get_mut(..len) else {
-			return Err(Error::new(ErrorKind::OutOfMemory, "Buffer too small"))
+			return Err(Error::new(ErrorKind::OutOfMemory, "Buffer too small"));
 		};
 		dst.copy_from_slice(src);
 
@@ -144,7 +152,7 @@ fn main() -> Result<Never> {
 	acceptor.check_private_key()?;
 
 	let context = acceptor.build().into_context();
-	
+
 	//
 	let buffer: SharedBuffer = Rc::new(RefCell::new(Udp6Packet::new_zeroed()));
 	let mut streams = BTreeMap::<SocketAddrV6, SslStream<_>>::new();
@@ -157,20 +165,37 @@ fn main() -> Result<Never> {
 		let first_bytes;
 
 		// Receive a packet off the TUN
-		{	let mut buffer = buffer.borrow_mut();
-			let Ok(length) = network.recv(buffer.as_mut_bytes()) else { continue };
-			let &Udp6Packet { ref ip, ref udp, buffer } = &*buffer;
+		{
+			let mut buffer = buffer.borrow_mut();
+			let Ok(length) = network.recv(buffer.as_mut_bytes()) else {
+				continue;
+			};
+			let &Udp6Packet {
+				ref ip,
+				ref udp,
+				buffer,
+			} = &*buffer;
 
 			// TODO: Cleanup old connections using a last encrypt timeout (destination must respond to keep the connection alive: SCTP would keep this up with heartbeats, but actually you could also keep this up by sending INIT requests and getting ABORT responses... so we're screwed.)
-			
+
 			// IPv6
-			if ip.flags.version() != 6 { continue }
-			if ip.len() != length { continue }
+			if ip.flags.version() != 6 {
+				continue;
+			}
+			if ip.len() != length {
+				continue;
+			}
 
 			// UDP
-			if ip.next_header != ip_proto::UDP { continue }
-			if (ip.payload_length.get() as usize) < size_of::<UdpHeader>() { continue }
-			if udp.length != ip.payload_length { continue }
+			if ip.next_header != ip_proto::UDP {
+				continue;
+			}
+			if (ip.payload_length.get() as usize) < size_of::<UdpHeader>() {
+				continue;
+			}
+			if udp.length != ip.payload_length {
+				continue;
+			}
 			let len = udp.length.get() as usize - size_of::<UdpHeader>();
 			let data = &buffer[..len];
 
@@ -217,25 +242,35 @@ fn main() -> Result<Never> {
 			// Progress the handshake if that's what we're doing
 			let res = stream.do_handshake();
 			if stream.ssl().is_init_finished() {
-				let session = session_pair(stream.ssl(), Config {
-					window_size: 0,
-					allow_repeat_tx: false,
-					encrypt_extension_headers: &[]
-				});
+				let session = session_pair(
+					stream.ssl(),
+					Config {
+						window_size: 0,
+						allow_repeat_tx: false,
+						encrypt_extension_headers: &[],
+					},
+				);
 				trace!(?session, "srtp session_pair");
 				stream.get_mut().sessions = session.ok();
 			}
 			res
 		} else if let Some([128..191, second_byte]) = first_bytes {
 			let mut packet = buffer.borrow_mut();
-			let &mut Udp6Packet { ref mut ip, ref mut udp, ref mut buffer } = &mut *packet;
+			let &mut Udp6Packet {
+				ref mut ip,
+				ref mut udp,
+				ref mut buffer,
+			} = &mut *packet;
 			let &mut Bio {
 				send_from,
 				send_to,
 				last_update: _, // TODO: Update last_update?
 				sessions: Some((ref mut incoming, ref mut outgoing)),
 				..
-			} = stream.get_mut() else { continue };
+			} = stream.get_mut()
+			else {
+				continue;
+			};
 			let mut cursor = Cursor::new(buffer.as_mut_bytes());
 			cursor.set_position(udp.length.get() as u64 - size_of::<UdpHeader>() as u64);
 
@@ -290,15 +325,23 @@ fn main() -> Result<Never> {
 		// Pull data out, and emit plaintext UDP
 		while stream.ssl().pending() > 0 {
 			let mut packet = buffer.borrow_mut();
-			let &mut Udp6Packet { ref mut ip, ref mut udp, ref mut buffer } = &mut *packet;
+			let &mut Udp6Packet {
+				ref mut ip,
+				ref mut udp,
+				ref mut buffer,
+			} = &mut *packet;
 
-			let Ok(len) = stream.ssl_read(buffer) else { break };
+			let Ok(len) = stream.ssl_read(buffer) else {
+				break;
+			};
 			let buf = &buffer[..len];
 			let payload_length = size_of::<UdpHeader>() + buf.len();
 			let packet_length = size_of::<Ip6Header>() + payload_length;
 
 			// After a successful read, update the send_to because we must have had valid application data:
-			let Bio { send_from, send_to, .. } = stream.get_mut();
+			let Bio {
+				send_from, send_to, ..
+			} = stream.get_mut();
 			*send_to = src;
 
 			// Construct our plaintext packet
@@ -321,9 +364,7 @@ fn main() -> Result<Never> {
 		// Handle cleaning up old connections
 		let max_age = Duration::from_mins(5);
 		if streams.len() > next_cleanup {
-			streams.retain(|_, stream| {
-				stream.get_ref().last_update.elapsed() < max_age
-			});
+			streams.retain(|_, stream| stream.get_ref().last_update.elapsed() < max_age);
 			next_cleanup = streams.len() + 10;
 		}
 	}

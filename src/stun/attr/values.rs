@@ -7,7 +7,10 @@ macro_rules! sockaddr_attr {
 	($typ:ident, $xor:literal) => {
 		impl crate::stun::attr::Attr<'_, { crate::stun::attr::$typ }> for core::net::SocketAddr {
 			type Error = crate::stun::attr::values::SocketAddrError;
-			fn decode(prefix: crate::stun::attr::Prefix, value: &[u8]) -> Result<Self, Self::Error> {
+			fn decode(
+				prefix: crate::stun::attr::Prefix,
+				value: &[u8],
+			) -> Result<Self, Self::Error> {
 				if value.len() < 4 {
 					return Err(Self::Error::UnexpectedLength);
 				}

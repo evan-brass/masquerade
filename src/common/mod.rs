@@ -1,16 +1,15 @@
 use core::borrow::BorrowMut;
-use core::{
-	net::SocketAddr,
-	net::SocketAddrV6,
-};
+use core::{net::SocketAddr, net::SocketAddrV6};
 
-use tappers::Tun;
 use crate::stun::{
-	Class, Method, Stun, MAGIC_COOKIE,
+	Class, MAGIC_COOKIE, Method, Stun,
 	attr::{integrity::Integrity, parse::AttrIter as _, *},
 };
-use crate::wire::{FromBytes, Icmp6Header, IntoBytes, Ip6Header, StunAttrHeader, UdpHeader, ip_checksum, ip_proto};
+use crate::wire::{
+	FromBytes, Icmp6Header, IntoBytes, Ip6Header, StunAttrHeader, UdpHeader, ip_checksum, ip_proto,
+};
 use rand::{RngCore, rng};
+use tappers::Tun;
 
 pub fn udp_checksum_fill(ip: &Ip6Header, udp: &mut UdpHeader, data: &[u8]) {
 	udp.checksum.set(0);
@@ -20,14 +19,22 @@ pub fn udp_checksum_fill(ip: &Ip6Header, udp: &mut UdpHeader, data: &[u8]) {
 		&[0, ip.next_header],
 		&ip.payload_length.as_bytes(),
 		&udp.as_bytes(),
-		data
+		data,
 	]);
-	udp.checksum.set(if checksum == 0 { 0xffff } else { checksum });
+	udp.checksum
+		.set(if checksum == 0 { 0xffff } else { checksum });
 }
 
-pub fn handle_turn<'i>(canonical: SocketAddr, relayed: SocketAddrV6, mut msg: Stun<&'i mut [u8]>, network: &Tun) -> Option<Stun<&'i mut [u8]>> {
+pub fn handle_turn<'i>(
+	canonical: SocketAddr,
+	relayed: SocketAddrV6,
+	mut msg: Stun<&'i mut [u8]>,
+	network: &Tun,
+) -> Option<Stun<&'i mut [u8]>> {
 	// Forbid all zeroes txid.  Current suspicion is amplification DDOS.
-	if msg.txid() == &[0; 12] { return None }
+	if msg.txid() == &[0; 12] {
+		return None;
+	}
 
 	// Parse TURN attributes
 	let mut username = None;
@@ -63,8 +70,7 @@ pub fn handle_turn<'i>(canonical: SocketAddr, relayed: SocketAddrV6, mut msg: St
 	);
 
 	// Compute a long-term key for authentication
-	let turn_key = if let (Some(username), Some(realm), Some(_)) = (username, realm, &integrity)
-	{
+	let turn_key = if let (Some(username), Some(realm), Some(_)) = (username, realm, &integrity) {
 		let mut ctx = md5::Context::new();
 		ctx.consume(username);
 		ctx.consume(":");
@@ -219,19 +225,27 @@ pub fn handle_turn<'i>(canonical: SocketAddr, relayed: SocketAddrV6, mut msg: St
 pub fn handle_net(len: usize, buffer: &mut [u8]) -> Option<(SocketAddrV6, Stun<&mut [u8]>)> {
 	let (ip, rest) = Ip6Header::ref_from_prefix(buffer).unwrap();
 
-	if ip.flags.version() != 6 { return None }
-	if ip.len() != len { return None }
+	if ip.flags.version() != 6 {
+		return None;
+	}
+	if ip.len() != len {
+		return None;
+	}
 
 	// Relay UDP data
 	if ip.next_header == ip_proto::UDP {
-		if ip.payload_length.get() < size_of::<UdpHeader>() as u16 { return None }
+		if ip.payload_length.get() < size_of::<UdpHeader>() as u16 {
+			return None;
+		}
 		let (udp, _) = UdpHeader::ref_from_prefix(rest).unwrap();
-		if udp.length != ip.payload_length { return None }
+		if udp.length != ip.payload_length {
+			return None;
+		}
 		let padding = (4 - udp.length.get() % 4) % 4;
 
 		// STUN (xor_peer + data header - udp header length + padding + udp packet length)
 		let Some(stun_length) = (24 + 4 - 8 + padding).checked_add(udp.length.get()) else {
-			return None
+			return None;
 		};
 		let data_len = udp.length.get() - 8;
 		let sender = SocketAddrV6::new(ip.src.into(), udp.src_port.get(), 0, 0);
@@ -244,7 +258,8 @@ pub fn handle_net(len: usize, buffer: &mut [u8]) -> Option<(SocketAddrV6, Stun<&
 		msg.set_length(0);
 		msg.set_cookie(MAGIC_COOKIE);
 		rng().fill_bytes(msg.set_txid());
-		msg.append::<XOR_PEER_ADDRESS, SocketAddr>(&sender.into()).unwrap();
+		msg.append::<XOR_PEER_ADDRESS, SocketAddr>(&sender.into())
+			.unwrap();
 
 		// Fill a STUN DATA attribute
 		let data = StunAttrHeader::mut_from_bytes(&mut msg.buffer[44..48]).unwrap();
@@ -257,20 +272,33 @@ pub fn handle_net(len: usize, buffer: &mut [u8]) -> Option<(SocketAddrV6, Stun<&
 
 		Some((receiver, msg))
 	}
-
 	// Relay ICMP messages
 	// I shouldn't be writing this.  Nobody uses this information, but I can't focus on anything atm.
 	else if ip.next_header == ip_proto::ICMP6 {
-		if ip.payload_length.get() < (size_of::<Icmp6Header>() + size_of::<Ip6Header>() + size_of::<UdpHeader>()) as u16 { return None }
+		if ip.payload_length.get()
+			< (size_of::<Icmp6Header>() + size_of::<Ip6Header>() + size_of::<UdpHeader>()) as u16
+		{
+			return None;
+		}
 		let (icmp, rest) = Icmp6Header::read_from_prefix(rest).unwrap();
-		if !matches!(icmp.typ, 1 | 2 | 3) { return None }
+		if !matches!(icmp.typ, 1 | 2 | 3) {
+			return None;
+		}
 		let (inner, rest) = Ip6Header::ref_from_prefix(rest).unwrap();
-		if inner.next_header != ip_proto::UDP { return None }
-		if inner.payload_length < size_of::<UdpHeader>() as u16 { return None }
+		if inner.next_header != ip_proto::UDP {
+			return None;
+		}
+		if inner.payload_length < size_of::<UdpHeader>() as u16 {
+			return None;
+		}
 		let (udp, _) = UdpHeader::ref_from_prefix(rest).unwrap();
-		if udp.length != inner.payload_length { return None }
+		if udp.length != inner.payload_length {
+			return None;
+		}
 
-		if ip.dst != inner.src { return None }
+		if ip.dst != inner.src {
+			return None;
+		}
 		let inner_sender = SocketAddrV6::new(inner.src.into(), udp.src_port.get(), 0, 0);
 		let inner_receiver = SocketAddrV6::new(inner.dst.into(), udp.dst_port.get(), 0, 0);
 
@@ -280,13 +308,13 @@ pub fn handle_net(len: usize, buffer: &mut [u8]) -> Option<(SocketAddrV6, Stun<&
 		msg.set_length(0);
 		msg.set_cookie(MAGIC_COOKIE);
 		rng().fill_bytes(msg.set_txid());
-		msg.append::<XOR_PEER_ADDRESS, SocketAddr>(&inner_receiver.into()).unwrap();
-		msg.append::<ICMP, _>(&(icmp.typ, icmp.code, icmp.arg)).unwrap();
+		msg.append::<XOR_PEER_ADDRESS, SocketAddr>(&inner_receiver.into())
+			.unwrap();
+		msg.append::<ICMP, _>(&(icmp.typ, icmp.code, icmp.arg))
+			.unwrap();
 
 		Some((inner_sender, msg))
-	}
-
-	else {
+	} else {
 		None
 	}
 }

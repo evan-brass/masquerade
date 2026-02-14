@@ -1,22 +1,12 @@
 use std::str::FromStr;
-use std::{
-	net::SocketAddr,
-	net::SocketAddrV6,
-	net::IpAddr,
-	net::Ipv6Addr,
-	os::fd::AsRawFd,
-};
+use std::{net::IpAddr, net::Ipv6Addr, net::SocketAddr, net::SocketAddrV6, os::fd::AsRawFd};
 
 use clap::Parser;
 use eyre::{Result, eyre};
 use ipnet::{IpBitAnd, IpBitOr, Ipv6Net};
 use masquerade::common::{handle_net, handle_turn};
-use mio::{
-	Events, Interest, Poll, Token,
-	net::UdpSocket,
-	unix::SourceFd,
-};
 use masquerade::stun::Stun;
+use mio::{Events, Interest, Poll, Token, net::UdpSocket, unix::SourceFd};
 use tappers::{Interface, Tun};
 use tracing_subscriber::EnvFilter;
 
@@ -50,7 +40,7 @@ impl FromStr for Mapping {
 		let udp = Ipv6Net::from_str(udp)?;
 		let tun = Ipv6Net::from_str(tun)?;
 		if udp.prefix_len() != tun.prefix_len() {
-			return Err(eyre!("subnets need to have the same size"))
+			return Err(eyre!("subnets need to have the same size"));
 		}
 		Ok(Self { udp, tun })
 	}
@@ -59,14 +49,14 @@ impl Mapping {
 	fn to_net(&self, addr: &mut Ipv6Addr) -> bool {
 		if self.udp.contains(&*addr) {
 			*addr = self.tun.network().bitor(self.udp.hostmask().bitand(*addr));
-			return true
+			return true;
 		}
 		false
 	}
 	fn to_udp(&self, addr: &mut Ipv6Addr) -> bool {
 		if self.tun.contains(&*addr) {
 			*addr = self.udp.network().bitor(self.tun.hostmask().bitand(*addr));
-			return true
+			return true;
 		}
 		false
 	}
@@ -95,7 +85,9 @@ fn main() -> Result<Never> {
 	// Parse subnet mappings
 	let mut mappings = Vec::new();
 	for s in args.mappings.split(',') {
-		if s.is_empty() { continue };
+		if s.is_empty() {
+			continue;
+		};
 		mappings.push(Mapping::from_str(s)?);
 	}
 
@@ -113,11 +105,15 @@ fn main() -> Result<Never> {
 			match e.token() {
 				// UDP recv
 				UDP => loop {
-					let Ok((len, sender)) = socket.recv_from(&mut buffer) else { break };
-					let msg = Stun {
-						buffer: buffer.as_mut_slice()
+					let Ok((len, sender)) = socket.recv_from(&mut buffer) else {
+						break;
 					};
-					if msg.decode(len).is_err() { continue }
+					let msg = Stun {
+						buffer: buffer.as_mut_slice(),
+					};
+					if msg.decode(len).is_err() {
+						continue;
+					}
 
 					let canonical = SocketAddr::new(sender.ip().to_canonical(), sender.port());
 					let mut mapped = match sender.ip() {
@@ -127,26 +123,36 @@ fn main() -> Result<Never> {
 					};
 					// Apply our subnet mappings to mapped
 					for m in &mappings {
-						if m.to_net(&mut mapped) { break }
+						if m.to_net(&mut mapped) {
+							break;
+						}
 					}
 					let relayed = SocketAddrV6::new(mapped.into(), sender.port(), 0, 0);
 
-					let Some(resp) = handle_turn(canonical, relayed, msg, &network) else { continue };
+					let Some(resp) = handle_turn(canonical, relayed, msg, &network) else {
+						continue;
+					};
 
 					// Send the STUN response:
 					let length = resp.len();
 					let _ = socket.send_to(&buffer[..length], sender);
-				}
+				},
 
 				// TUN Recv
 				TUN => loop {
-					let Ok(len) = network.recv(&mut buffer) else { break };
+					let Ok(len) = network.recv(&mut buffer) else {
+						break;
+					};
 
-					let Some((receiver, msg)) = handle_net(len, &mut buffer) else { continue };
+					let Some((receiver, msg)) = handle_net(len, &mut buffer) else {
+						continue;
+					};
 
 					let mut mapped = *receiver.ip();
 					for m in &mappings {
-						if m.to_udp(&mut mapped) { break }
+						if m.to_udp(&mut mapped) {
+							break;
+						}
 					}
 					// TODO: For non-dual-stack sockets, we need this to be an ipv6 mapped address and then we need to canonicalize it. (I think that's correct at least...)
 					let mapped_receiver = SocketAddr::new(mapped.into(), receiver.port());
@@ -155,7 +161,7 @@ fn main() -> Result<Never> {
 					let length = msg.len();
 					// TODO: For non-dual-stack sockets, we probably need the receiver in canonical form...
 					let _ = socket.send_to(&msg.buffer[..length], mapped_receiver.into());
-				}
+				},
 				// We don't use any other tokens
 				_ => unreachable!(),
 			}

@@ -2,8 +2,8 @@
 //! We only implement part of it
 
 use super::attr::{
+	ADDRESS_ERROR_CODE, Attr, AttrEnc, CHANNEL_NUMBER, EVEN_PORT, ICMP, RESERVATION_TOKEN,
 	values::{empty_attr, numeric_attr, slice_attr, sockaddr_attr},
-	Attr, AttrEnc, ADDRESS_ERROR_CODE, CHANNEL_NUMBER, EVEN_PORT, ICMP, RESERVATION_TOKEN,
 };
 
 sockaddr_attr!(XOR_PEER_ADDRESS, true);

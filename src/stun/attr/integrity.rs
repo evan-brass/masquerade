@@ -1,5 +1,5 @@
 #[allow(unused_imports)]
-use super::{Attr, AttrEnc, Prefix, FINGERPRINT, MESSAGE_INTEGRITY, MESSAGE_INTEGRITY_SHA256};
+use super::{Attr, AttrEnc, FINGERPRINT, MESSAGE_INTEGRITY, MESSAGE_INTEGRITY_SHA256, Prefix};
 
 // Decoding is always available, but encoding / verifying requires openssl
 pub struct Integrity<'i, const L: usize> {
@@ -33,7 +33,7 @@ impl<'i> Attr<'i, MESSAGE_INTEGRITY_SHA256> for Integrity<'i, 32> {
 }
 
 mod mbedtls_integrity {
-	use hmac::{digest::FixedOutput as _, Hmac, Mac};
+	use hmac::{Hmac, Mac, digest::FixedOutput as _};
 	use sha1::Sha1;
 
 	use super::*;

@@ -2,7 +2,7 @@
 //! We only implement part of it
 
 use super::attr::values::{sockaddr_attr, str_attr};
-use super::attr::{Attr, AttrEnc, Prefix, ERROR_CODE, UNKNOWN_ATTRIBUTES};
+use super::attr::{Attr, AttrEnc, ERROR_CODE, Prefix, UNKNOWN_ATTRIBUTES};
 
 sockaddr_attr!(MAPPED_ADDRESS, false);
 str_attr!(USERNAME);

@@ -1,5 +1,9 @@
-use bitfield::{bitfield, BitRange, BitRangeMut};
-pub use zerocopy::{big_endian::{U16, U32}, little_endian::{U32 as U32_LE}, FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
+use bitfield::{BitRange, BitRangeMut, bitfield};
+pub use zerocopy::{
+	FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned,
+	big_endian::{U16, U32},
+	little_endian::U32 as U32_LE,
+};
 
 pub mod ip_proto {
 	pub const UDP: u8 = 17;
@@ -17,12 +21,18 @@ bitfield! {
 	pub u8, traffic_class, set_traffic_class: 27, 20;
 	pub u32, flow_label, set_flow_label: 19, 0;
 }
-impl<T> BitRange<T> for Ip6Flags where u32: BitRange<T> {
+impl<T> BitRange<T> for Ip6Flags
+where
+	u32: BitRange<T>,
+{
 	fn bit_range(&self, msb: usize, lsb: usize) -> T {
 		u32::from_be_bytes(self.0).bit_range(msb, lsb)
 	}
 }
-impl<T> BitRangeMut<T> for Ip6Flags where u32: BitRangeMut<T> {
+impl<T> BitRangeMut<T> for Ip6Flags
+where
+	u32: BitRangeMut<T>,
+{
 	fn set_bit_range(&mut self, msb: usize, lsb: usize, value: T) {
 		let mut t = u32::from_be_bytes(self.0);
 		t.set_bit_range(msb, lsb, value);
@@ -55,7 +65,6 @@ pub struct UdpHeader {
 	pub checksum: U16,
 }
 
-
 #[repr(C)]
 #[derive(Debug, Clone, Copy, KnownLayout, Immutable, Unaligned, FromBytes, IntoBytes)]
 pub struct Udp6Packet<const N: usize> {
@@ -70,7 +79,7 @@ pub struct StunHeader {
 	pub typ: U16,
 	pub length: U16,
 	pub cookie: U32,
-	pub txid: [u8; 12]
+	pub txid: [u8; 12],
 }
 #[repr(C)]
 #[derive(Debug, Clone, Copy, KnownLayout, Immutable, Unaligned, FromBytes, IntoBytes)]
@@ -116,16 +125,17 @@ pub fn ip_checksum(slices: &[&[u8]]) -> u16 {
 
 #[test]
 fn udp_checksum() {
-	assert_eq!(0xaff5, ip_checksum(&[
-		/* IPv4 src */ &[127, 0, 0, 1],
-		/* IPv4 dst */ &[127, 0, 0, 1],
-
-		/* UDP Pseudo */ &[0, 17, 0x00, 0x13],
-
-		/* UDP ports */ &[0, 1, 0, 1],
-		/* UDP Length */ &[0x00, 0x13],
-		/* UDP Payload */ b"Hello World"
-	]));
+	assert_eq!(
+		0xaff5,
+		ip_checksum(&[
+			/* IPv4 src */ &[127, 0, 0, 1],
+			/* IPv4 dst */ &[127, 0, 0, 1],
+			/* UDP Pseudo */ &[0, 17, 0x00, 0x13],
+			/* UDP ports */ &[0, 1, 0, 1],
+			/* UDP Length */ &[0x00, 0x13],
+			/* UDP Payload */ b"Hello World"
+		])
+	);
 }
 
 #[repr(C)]

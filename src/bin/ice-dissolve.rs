@@ -1,15 +1,15 @@
-use eyre::Result;
 use clap::Parser;
+use eyre::Result;
 use masquerade::common::udp_checksum_fill;
-use tappers::{Interface, Tun};
-use tracing_subscriber::EnvFilter;
-use masquerade::wire::{FromBytes, Ip6Header, UdpHeader, ip_proto};
 use masquerade::stun::{
 	Class, Method, Stun,
 	attr::{integrity::Integrity, parse::AttrIter as _, *},
 };
+use masquerade::wire::{FromBytes, Ip6Header, UdpHeader, ip_proto};
 use std::mem::swap;
 use std::net::SocketAddr;
+use tappers::{Interface, Tun};
+use tracing_subscriber::EnvFilter;
 
 type Never = core::convert::Infallible;
 
@@ -28,44 +28,56 @@ fn main() -> Result<Never> {
 
 	// Parse command line arguments
 	let args = Args::try_parse()?;
-	
+
 	// Setup the TUN interface
 	let network = if let Some(if_name) = args.if_name {
 		Tun::new_named(Interface::new(if_name)?)?
 	} else {
 		Tun::new()?
 	};
-	
+
 	let mut buffer = [0; 65536];
 
 	loop {
-		let Ok(mut length) = network.recv(&mut buffer) else { continue };
+		let Ok(mut length) = network.recv(&mut buffer) else {
+			continue;
+		};
 
 		// Intercept ICE connection tests with `dissolve` as the dst-ufrag
 		'intercept: {
 			// IPv6
-			let Ok((ip, rest)) = Ip6Header::mut_from_prefix(buffer.as_mut_slice()) else { break 'intercept };
-			if ip.flags.version() != 6 { break 'intercept }
-			if ip.len() != length { break 'intercept }
+			let Ok((ip, rest)) = Ip6Header::mut_from_prefix(buffer.as_mut_slice()) else {
+				break 'intercept;
+			};
+			if ip.flags.version() != 6 {
+				break 'intercept;
+			}
+			if ip.len() != length {
+				break 'intercept;
+			}
 
 			// UDP
-			if ip.next_header != ip_proto::UDP { break 'intercept }
-			if (ip.payload_length.get() as usize) < size_of::<UdpHeader>() {
-				break 'intercept
+			if ip.next_header != ip_proto::UDP {
+				break 'intercept;
 			}
-			let Ok((udp, rest)) = UdpHeader::mut_from_prefix(rest) else { break 'intercept };
-			if udp.length != ip.payload_length { break 'intercept }
+			if (ip.payload_length.get() as usize) < size_of::<UdpHeader>() {
+				break 'intercept;
+			}
+			let Ok((udp, rest)) = UdpHeader::mut_from_prefix(rest) else {
+				break 'intercept;
+			};
+			if udp.length != ip.payload_length {
+				break 'intercept;
+			}
 			let data_len = udp.length.get() as usize - size_of::<UdpHeader>();
 
 			// STUN
 			if !matches!(rest.first(), Some(0..3)) {
 				break 'intercept;
 			}
-			let mut inner = Stun {
-				buffer: rest,
-			};
+			let mut inner = Stun { buffer: rest };
 			if inner.decode(data_len).is_err() {
-				break 'intercept
+				break 'intercept;
 			}
 			if inner.class() != Class::Request || inner.method() != Method::Binding {
 				break 'intercept;
@@ -149,7 +161,9 @@ fn main() -> Result<Never> {
 			swap(&mut udp.src_port, &mut udp.dst_port);
 
 			// Unwrap: Our responses are all fixed size and small enough
-			let udp_length = (size_of::<UdpHeader>() as u16 + 20 /* size_of::<StunHeader>() */).checked_add(inner.length()).unwrap();
+			let udp_length = (size_of::<UdpHeader>() as u16 + 20/* size_of::<StunHeader>() */)
+				.checked_add(inner.length())
+				.unwrap();
 			udp.length.set(udp_length);
 			ip.payload_length = udp.length;
 			let data = &inner.buffer[..inner.len()];
