@@ -1,39 +1,33 @@
 use std::{
 	io::{Error, ErrorKind, IoSlice, IoSliceMut},
 	mem::{transmute, zeroed},
-	net::{Ipv6Addr, SocketAddrV6, UdpSocket},
+	net::{Ipv6Addr, SocketAddrV6},
 	os::{fd::AsRawFd, raw::c_int},
 	ptr::{NonNull, from_mut, from_ref, read_unaligned, write_unaligned},
-	str::{FromStr, from_utf8},
+	str::from_utf8,
 };
 
 use clap::Parser;
-use eyre::{Result, eyre};
-use gio::Socket as GSocket;
-use gstreamer::{
-	ElementFactory, Pipeline,
-	glib::object::ObjectExt,
-	prelude::{ElementExt, ElementExtManual, GstBinExtManual, UnixBusExtManual},
-};
-use ipnet::Ipv6Net;
+use eyre::Result;
 use libc::{
 	CMSG_DATA, CMSG_FIRSTHDR, CMSG_LEN, CMSG_NXTHDR, CMSG_SPACE, IPPROTO_SCTP, MSG_EOR,
 	MSG_NOTIFICATION, MSG_TRUNC, SCTP_ALL_ASSOC, SCTP_ENABLE_CHANGE_ASSOC_REQ,
-	SCTP_ENABLE_RESET_ASSOC_REQ, SCTP_ENABLE_RESET_STREAM_REQ, SCTP_INITMSG, SCTP_PR_SCTP_RTX,
-	SCTP_PRINFO, SCTP_RECVRCVINFO, SCTP_SNDINFO, SCTP_UNORDERED, cmsghdr, getsockopt, msghdr,
-	recvmsg, sctp_assoc_t, sctp_initmsg, sctp_prinfo, sctp_rcvinfo, sctp_sndinfo, sendmsg,
-	setsockopt, sockaddr_storage, socklen_t,
+	SCTP_ENABLE_RESET_ASSOC_REQ, SCTP_ENABLE_RESET_STREAM_REQ, SCTP_PR_SCTP_RTX, SCTP_PRINFO,
+	SCTP_RECVRCVINFO, SCTP_SENDALL, SCTP_SNDINFO, SCTP_UNORDERED, cmsghdr, getsockopt, msghdr,
+	recvmsg, sctp_prinfo, sctp_rcvinfo, sctp_sndinfo, sendmsg, setsockopt, sockaddr_storage,
+	socklen_t,
 };
 use masquerade::{
 	sctp::linux::{
 		SCTP_ENABLE_STREAM_RESET, SCTP_REMOTE_UDP_ENCAPS_PORT, sctp_assoc_change, sctp_assoc_value,
 		sctp_event, sctp_sac_state, sctp_shutdown_event, sctp_sn_type, sctp_udpencaps, sn_header,
 	},
-	wire::{DcepOpenHeader, Ip6Header},
+	wire::{DcepOpenHeader, EtherHeader},
 };
 use mio::{Events, Interest, Poll, Token, unix::SourceFd};
+use openssl::rand::rand_bytes;
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
-use tappers::{Interface, Tun};
+use tappers::{Interface, Tap};
 use tracing::{debug, error, trace};
 use tracing_subscriber::EnvFilter;
 use zerocopy::{FromBytes, IntoBytes};
@@ -46,55 +40,17 @@ struct Args {
 	#[arg(long, short, default_value_t = 5000)]
 	port: u16,
 
-	#[arg(long, short, default_value_t = 4666)]
-	rtp_port: u16,
-
-	#[arg(long, short, default_value = "fd00::1:0:0/96")]
-	subnet: String,
-
 	#[arg(long, short)]
 	if_name: Option<String>,
 }
 
-struct Mapping {
-	subnet: Ipv6Net,
-}
-impl Mapping {
-	fn new(subnet: Ipv6Net) -> Result<Self> {
-		let min_prefix_len = 128 - sctp_assoc_t::BITS;
-		if min_prefix_len > subnet.prefix_len() as u32 {
-			return Err(eyre!(
-				"Need at most /{min_prefix_len} subnet for a system with {} sctp_assoc_t bits, found /{}",
-				sctp_assoc_t::BITS,
-				subnet.prefix_len()
-			));
-		}
-		Ok(Self { subnet })
-	}
-	fn from_index(&self, index: sctp_assoc_t) -> Option<Ipv6Addr> {
-		// The remaining 17 or 49 bits are the host
-		let host = Ipv6Addr::from_bits(index as u128);
-		let ip = self.subnet.network() | host;
-
-		// Check if we've exceeded our subnet
-		if !self.subnet.contains(&ip) {
-			return None;
-		}
-
-		Some(ip)
-	}
-	fn to_index(&self, addr: Ipv6Addr) -> Option<sctp_assoc_t> {
-		if !self.subnet.contains(&addr) {
-			return None;
-		};
-		let host = addr & self.subnet.hostmask();
-		Some(host.to_bits() as sctp_assoc_t)
-	}
+fn fmt_mac(mac: &[u8; 6]) -> String {
+	let [a, b, c, d, e, f] = mac;
+	format!("{a:02x}:{b:02x}:{c:02x}:{d:02x}:{e:02x}:{f:02x}")
 }
 
-const TUN: Token = Token(usize::MAX);
+const TAP: Token = Token(usize::MAX);
 const SCTP: Token = Token(usize::MAX - 1);
-const BUS: Token = Token(usize::MAX - 2);
 
 fn main() -> Result<Never> {
 	// Enable logging
@@ -105,13 +61,19 @@ fn main() -> Result<Never> {
 	// Parse command line arguments
 	let args = Args::try_parse()?;
 
-	let mapping = Mapping::new(Ipv6Net::from_str(&args.subnet)?)?;
+	let mut oui = [0; 6];
+	rand_bytes(&mut oui[0..3])?;
+	// Clear the Multicast bit
+	oui[0] &= !0b01;
+	// Set the locally administered bit
+	oui[0] |= 0b10;
+	trace!("OUI: {}", fmt_mac(&oui));
 
-	// Setup the TUN interface
+	// Setup the TAP interface
 	let mut network = if let Some(if_name) = args.if_name {
-		Tun::new_named(Interface::new(if_name)?)?
+		Tap::new_named(Interface::new(if_name)?)?
 	} else {
-		Tun::new()?
+		Tap::new()?
 	};
 	network.set_nonblocking(true)?;
 
@@ -153,22 +115,22 @@ fn main() -> Result<Never> {
 	assert_eq!(res, 0, "Failed to enable stream resets");
 
 	// Configure the init message to increase ostreams to 65535
-	let value = sctp_initmsg {
-		sinit_max_instreams: 65535,
-		sinit_num_ostreams: 65535,
-		sinit_max_attempts: 0,
-		sinit_max_init_timeo: 0,
-	};
-	let res = unsafe {
-		setsockopt(
-			socket.as_raw_fd(),
-			IPPROTO_SCTP,
-			SCTP_INITMSG,
-			from_ref(&value).cast(),
-			size_of_val(&value) as socklen_t,
-		)
-	};
-	assert_eq!(res, 0, "Failed to set init message params");
+	// let value = sctp_initmsg {
+	// 	sinit_max_instreams: 65535,
+	// 	sinit_num_ostreams: 65535,
+	// 	sinit_max_attempts: 0,
+	// 	sinit_max_init_timeo: 0,
+	// };
+	// let res = unsafe {
+	// 	setsockopt(
+	// 		socket.as_raw_fd(),
+	// 		IPPROTO_SCTP,
+	// 		SCTP_INITMSG,
+	// 		from_ref(&value).cast(),
+	// 		size_of_val(&value) as socklen_t,
+	// 	)
+	// };
+	// assert_eq!(res, 0, "Failed to set init message params");
 
 	// Enable association change messages
 	let value = sctp_event {
@@ -205,42 +167,10 @@ fn main() -> Result<Never> {
 	};
 	assert_eq!(res, 0, "Failed to enable shutdown message");
 
-	// Bind a UDP socket to serve as the entry/exit point for our gstreamer stuff
-	let rtp_udp = UdpSocket::bind(SocketAddrV6::new(
-		Ipv6Addr::UNSPECIFIED,
-		args.rtp_port,
-		0,
-		0,
-	))?;
-	let rtp_udp = GSocket::from_fd(rtp_udp.into())?;
-
-	// setup a gstreamer pipeline
-	gstreamer::init()?;
-	let pipeline = Pipeline::new();
-	let bus = pipeline.bus().ok_or(eyre!("No bus on pipeline?"))?;
-
-	let udpsrc = ElementFactory::make("udpsrc").build()?;
-	udpsrc.set_property("socket", rtp_udp);
-
-	let rtpbin = ElementFactory::make("rtpbin").build()?;
-	rtpbin.set_property("autoremove", true);
-	let _ = rtpbin.connect("on-new-sender-ssrc", false, |args| {
-		trace!(?args, "new sender SSRC");
-		None
-	});
-
-	pipeline.add_many([&udpsrc, &rtpbin])?;
-
-	udpsrc.link(&rtpbin)?;
-
-	pipeline.set_state(gstreamer::State::Playing)?;
-
 	let mut events = Events::with_capacity(128);
 	let mut poll = Poll::new()?;
 	poll.registry()
-		.register(&mut SourceFd(&bus.pollfd()), BUS, Interest::READABLE)?;
-	poll.registry()
-		.register(&mut SourceFd(&network.as_raw_fd()), TUN, Interest::READABLE)?;
+		.register(&mut SourceFd(&network.as_raw_fd()), TAP, Interest::READABLE)?;
 	poll.registry()
 		.register(&mut SourceFd(&socket.as_raw_fd()), SCTP, Interest::READABLE)?;
 
@@ -250,25 +180,27 @@ fn main() -> Result<Never> {
 	loop {
 		for e in events.into_iter() {
 			match e.token() {
-				BUS => loop {
-					let Some(msg) = bus.pop() else { break };
-					trace!(?msg, "gst bus message");
-				},
-				TUN => loop {
+				TAP => loop {
 					let Ok(length) = network.recv(&mut buffer) else {
 						break;
 					};
-					let (ip, _) = Ip6Header::ref_from_prefix(buffer.as_slice()).unwrap();
-					if ip.flags.version() != 6 {
-						continue;
+					if length < size_of::<EtherHeader>() {
+						panic!("WAT?");
 					}
-					if ip.len() != length {
-						continue;
-					}
+					let (eth, _) = EtherHeader::ref_from_prefix(buffer.as_slice()).unwrap();
 
-					let Some(assoc_id) = mapping.to_index(ip.dst.into()) else {
+					let assoc_id;
+					let mut snd_flags = SCTP_UNORDERED as u16;
+					if (eth.dst[0] & 0b01) != 0 {
+						assoc_id = SCTP_ALL_ASSOC;
+						snd_flags |= SCTP_SENDALL as u16;
+					} else if eth.dst[0..3] == oui {
+						assoc_id = i32::from_be_bytes([0, eth.dst[3], eth.dst[4], eth.dst[5]]);
+					} else {
+						trace!(?eth, "Mac address didn't match our oui");
 						continue;
 					};
+
 					// Tunnel the packet
 					let mut control = [0u8; unsafe {
 						CMSG_SPACE(size_of::<sctp_sndinfo>() as socklen_t)
@@ -293,7 +225,7 @@ fn main() -> Result<Never> {
 							CMSG_DATA(cmsg).cast(),
 							sctp_sndinfo {
 								snd_sid: 1,
-								snd_flags: SCTP_UNORDERED as u16,
+								snd_flags,
 								snd_ppid: 53u32.to_be(),
 								snd_context: 0,
 								snd_assoc_id: assoc_id,
@@ -388,11 +320,12 @@ fn main() -> Result<Never> {
 							}
 
 							// Open a datachannel
-							let Some(addr) = mapping.from_index(change.sac_assoc_id) else {
-								continue;
-							};
-							let label = format!("{addr}");
-							let protocol = "INET6";
+							let assoc_id = change.sac_assoc_id;
+							let mut mac = [0; 6];
+							mac[0..3].copy_from_slice(&oui[0..3]);
+							mac[3..].copy_from_slice(&assoc_id.to_be_bytes()[1..]);
+							let label = fmt_mac(&mac);
+							let protocol = "ETHER";
 							let dcep = DcepOpenHeader {
 								msg_typ: 0x03,         /* DCEP_CHANNEL_OPEN */
 								channel_typ: 0x81,     /* CHANNEL_TYPE_PARTIAL_RELIABLE_REXMIT_UNORDERED */
@@ -496,7 +429,10 @@ fn main() -> Result<Never> {
 
 						let stream = recvinfo.rcv_sid;
 						let ppid = u32::from_be(recvinfo.rcv_ppid);
+
 						let assoc_id = recvinfo.rcv_assoc_id;
+						let mut mac = oui.clone();
+						mac[3..].copy_from_slice(&assoc_id.to_be_bytes()[1..]);
 
 						match (ppid, stream) {
 							(50, _) => trace!(?assoc_id, ?addr6, ?stream, ?data, "DCEP message"),
@@ -539,21 +475,13 @@ fn main() -> Result<Never> {
 							}
 							// VPN traffic
 							(53, 1) => {
-								let Ok((ip6, _)) = Ip6Header::ref_from_prefix(data) else {
+								let Ok((eth, _)) = EtherHeader::ref_from_prefix(data) else {
 									continue;
 								};
-								if ip6.flags.version() != 6 {
+								if eth.src != mac {
+									trace!(?eth, "Wrong MAC src");
 									continue;
 								}
-								if ip6.len() != data.len() {
-									continue;
-								}
-								let Some(expected) = mapping.from_index(assoc_id) else {
-									continue;
-								};
-								if ip6.src != expected.octets() {
-									continue;
-								};
 								let _ = network.send(data);
 							}
 							_ => trace!(?assoc_id, ?addr6, ?stream, ?ppid, ?data, "Other message"),

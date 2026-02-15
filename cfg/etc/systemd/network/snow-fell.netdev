@@ -1,6 +1,6 @@
 [NetDev]
 Name=snow-fell
-Kind=tun
+Kind=tap
 
 [Tun]
 User=masquerade

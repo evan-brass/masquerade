@@ -146,3 +146,11 @@ pub struct Icmp6Header {
 	pub checksum: U16,
 	pub arg: [u8; 4], // For our purposes, every typ+code will have an arg.
 }
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, KnownLayout, Immutable, Unaligned, FromBytes, IntoBytes)]
+pub struct EtherHeader {
+	pub dst: [u8; 6],
+	pub src: [u8; 6],
+	pub typ: U16,
+}

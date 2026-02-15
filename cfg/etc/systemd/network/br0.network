@@ -1,14 +1,11 @@
 [Match]
-Name=snow-fell
+Name=br0
 
 [Network]
 ConfigureWithoutCarrier=yes
-IgnoreCarrierLoss=yes
-Bridge=br0
 
 [Link]
 RequiredForOnline=no
 
 [Bridge]
-MulticastToUnicast=yes
-Hairpin=yes
+Learning=yes
