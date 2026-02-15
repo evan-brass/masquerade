@@ -1,0 +1,25 @@
+From 7921e5eed4c7966438fcb08dd1fc66986b804d0b Mon Sep 17 00:00:00 2001
+From: Evan Brass <brassevan@gmail.com>
+Date: Sun, 15 Feb 2026 03:39:12 +0000
+Subject: [PATCH] Fix VecLike::reserve for Cursor
+
+---
+ src/vec_like.rs | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/src/vec_like.rs b/src/vec_like.rs
+index 5c9a965..b2d7dca 100644
+--- a/src/vec_like.rs
++++ b/src/vec_like.rs
+@@ -69,7 +69,7 @@ impl<'a> VecLike for std::io::Cursor<&'a mut [u8]> {
+         let pos = self.position().try_into().unwrap_or(usize::max_value());
+         let reserved = pos.saturating_add(additional);
+ 
+-        if reserved >= self.get_ref().len() {
++        if reserved <= self.get_ref().len() {
+             Ok(())
+         } else {
+             Err(BufferTooShortError {
+-- 
+2.47.3
+

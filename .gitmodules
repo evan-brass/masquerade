@@ -1,0 +1,6 @@
+[submodule "vendor/srtp"]
+	path = vendor/srtp
+	url = https://github.com/HyeonuPark/srtp.git
+[submodule "vendor/tappers"]
+	path = vendor/tappers
+	url = https://github.com/pkts-rs/tappers.git

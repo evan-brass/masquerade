@@ -1,0 +1,25 @@
+From 1657a1bfa45a985d3a93ab7fcd1497d518f097b6 Mon Sep 17 00:00:00 2001
+From: Evan Brass <brassevan@gmail.com>
+Date: Sun, 15 Feb 2026 03:40:28 +0000
+Subject: [PATCH] Match TUN::new_named
+
+---
+ src/linux/tap.rs | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/src/linux/tap.rs b/src/linux/tap.rs
+index 957f99e..7606dfc 100644
+--- a/src/linux/tap.rs
++++ b/src/linux/tap.rs
+@@ -74,7 +74,7 @@ impl Tap {
+     /// Opens or creates a TTAP device of the given name.
+     #[inline]
+     pub fn new_named(if_name: Interface) -> io::Result<Self> {
+-        let flags = libc::IFF_TAP | libc::IFF_NO_PI | libc::IFF_TUN_EXCL;
++        let flags = libc::IFF_TAP | libc::IFF_NO_PI;
+ 
+         let mut req = libc::ifreq {
+             ifr_name: if_name.name_raw_char(),
+-- 
+2.47.3
+

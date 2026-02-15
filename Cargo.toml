@@ -8,8 +8,6 @@ bitfield = "0.19.1"
 clap = { version = "4.5.39", features = ["derive"] }
 crc = "3.2.1"
 eyre = "0.6.12"
-gio = "0.21.5"
-gstreamer = "0.24.4"
 hmac = "0.12.1"
 ipnet = "2.11.0"
 libc = "0.2.180"
@@ -21,11 +19,15 @@ rand = "0.9.1"
 sha1 = "0.10.6"
 slab = "0.4.10"
 socket2 = { version = "0.6.2", features = ["all"] }
-srtp = { git = "https://github.com/evan-brass/srtp.git", branch = "patch-1", default-features = false, features = ["enable-openssl"] }
+srtp = { version = "0.7.0", default-features = false, features = ["enable-openssl"] }
 tappers = "0.4.2"
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
 zerocopy = { version = "0.8.25", features = ["derive"] }
+
+[patch.crates-io]
+srtp = { path = "vendor/srtp" }
+tappers = { path = "vendor/tappers" }
 
 [features]
 std = []
