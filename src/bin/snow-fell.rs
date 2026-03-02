@@ -194,7 +194,7 @@ fn main() -> Result<Never> {
 					if (eth.dst[0] & 0b01) != 0 {
 						assoc_id = SCTP_ALL_ASSOC;
 						snd_flags |= SCTP_SENDALL as u16;
-					} else if eth.dst[0..3] == oui {
+					} else if eth.dst[0..3] == oui[0..3] {
 						assoc_id = i32::from_be_bytes([0, eth.dst[3], eth.dst[4], eth.dst[5]]);
 					} else {
 						trace!(?eth, "Mac address didn't match our oui");
