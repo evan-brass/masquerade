@@ -57,8 +57,6 @@ function log_everything(conn, label = conn.pid, channel = conn.dc) {
 
 <!-- Hosted -->
 <script type="module">
-import { Ip6 } from './src/ip6.js';
-
 const h = new RTCPeerConnection(config);
 log_everything(h, 'h');
 await h.setRemoteDescription({type:'offer',sdp:`v=0
