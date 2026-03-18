@@ -159,3 +159,28 @@ await b.setLocalDescription();
 while (b.iceGatheringState != 'complete') await state({'icegatheringstatechange': b});
 await a.setRemoteDescription(b.localDescription);
 </script>
+
+<!-- Hosted Direct -->
+<script type="_module">
+const h = new RTCPeerConnection();
+log_everything(h, 'h');
+
+await h.setRemoteDescription({type:'offer',sdp:`v=0
+o=- 42 2 IN IP4 0.0.0.0
+s=-
+t=0 0
+a=group:BUNDLE dc
+a=ice-ufrag:dissolve
+a=ice-pwd:the/ice/password/constant
+a=ice-lite
+a=setup:passive
+a=fingerprint:sha-256 43:78:3C:C8:1E:A5:62:5E:A8:AA:7D:CF:04:9A:0C:A8:7D:8E:28:12:FA:EA:A0:47:42:98:36:3A:8C:68:C4:B0
+m=application 0 UDP/DTLS/SCTP webrtc-datachannel
+c=IN IP4 0.0.0.0
+a=bundle-only
+a=mid:dc
+a=sctp-port:5000
+`});
+await h.setLocalDescription();
+await h.addIceCandidate(hosted());
+</script>

@@ -8,14 +8,10 @@ IgnoreCarrierLoss=yes
 [Link]
 RequiredForOnline=no
 
-# Capture TURN traffic
+# redirect all fwmark 0x1 to ice-dissolve
 [RoutingPolicyRule]
 Family=ipv6
-IncomingInterface=turn-udp
-Table=ice-dissolve
-[RoutingPolicyRule]
-Family=ipv6
-IncomingInterface=turn-tcp
+FirewallMark=0x1
 Table=ice-dissolve
 
 [Route]
